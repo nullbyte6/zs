@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const glob = @import("glob.zig");
 
 pub const Command = struct {
     argv: []const []const u8,
@@ -37,6 +38,8 @@ pub const Parser = struct {
     pos: usize = 0,
     last_status: u8 = 0,
     word: std.ArrayList(u8),
+    pattern: std.ArrayList(u8),
+    has_glob: bool = false,
     in_word: bool = false,
     words: std.ArrayList([]const u8),
     commands: std.ArrayList(Command),
@@ -48,6 +51,7 @@ pub const Parser = struct {
             .arena = arena,
             .line = line,
             .word = .init(arena),
+            .pattern = .init(arena),
             .words = .init(arena),
             .commands = .init(arena),
         };
@@ -65,17 +69,17 @@ pub const Parser = struct {
                 },
                 '\'' => {
                     const end = std.mem.indexOfScalarPos(u8, line, self.pos + 1, '\'') orelse return error.UnterminatedQuote;
-                    try self.word.appendSlice(line[self.pos + 1 .. end]);
+                    try self.appendLiteralSlice(line[self.pos + 1 .. end]);
                     self.in_word = true;
                     self.pos = end + 1;
                 },
                 '"' => try self.doubleQuoted(),
                 '\\' => {
                     if (self.pos + 1 < line.len) {
-                        try self.word.append(line[self.pos + 1]);
+                        try self.appendLiteral(line[self.pos + 1]);
                         self.pos += 2;
                     } else {
-                        try self.word.append('\\');
+                        try self.appendLiteral('\\');
                         self.pos += 1;
                     }
                     self.in_word = true;
@@ -102,18 +106,25 @@ pub const Parser = struct {
                 '~' => {
                     if (!self.in_word and tildeEnds(line, self.pos + 1)) {
                         if (posix.getenv("HOME")) |home| {
-                            try self.word.appendSlice(home);
+                            try self.appendLiteralSlice(home);
                             self.in_word = true;
                             self.pos += 1;
                             continue;
                         }
                     }
-                    try self.word.append('~');
+                    try self.appendLiteral('~');
+                    self.in_word = true;
+                    self.pos += 1;
+                },
+                '*', '?', '[' => {
+                    try self.word.append(c);
+                    try self.pattern.append(c);
+                    self.has_glob = true;
                     self.in_word = true;
                     self.pos += 1;
                 },
                 else => {
-                    try self.word.append(c);
+                    try self.appendLiteral(c);
                     self.in_word = true;
                     self.pos += 1;
                 },
@@ -128,8 +139,28 @@ pub const Parser = struct {
 
     fn flushWord(self: *Parser) Error!void {
         if (!self.in_word) return;
-        try self.words.append(try self.word.toOwnedSlice());
+        const literal = try self.word.toOwnedSlice();
+        const pattern = try self.pattern.toOwnedSlice();
         self.in_word = false;
+        if (self.has_glob) {
+            self.has_glob = false;
+            const matches = try glob.expand(self.arena, pattern);
+            if (matches.len > 0) {
+                try self.words.appendSlice(matches);
+                return;
+            }
+        }
+        try self.words.append(literal);
+    }
+
+    fn appendLiteral(self: *Parser, c: u8) Error!void {
+        try self.word.append(c);
+        if (std.mem.indexOfScalar(u8, "*?[\\", c) != null) try self.pattern.append('\\');
+        try self.pattern.append(c);
+    }
+
+    fn appendLiteralSlice(self: *Parser, bytes: []const u8) Error!void {
+        for (bytes) |c| try self.appendLiteral(c);
     }
 
     fn endCommand(self: *Parser) Error!void {
@@ -165,11 +196,11 @@ pub const Parser = struct {
                 continue;
             }
             if (c == '\\' and self.pos + 1 < line.len and std.mem.indexOfScalar(u8, "\"\\$`", line[self.pos + 1]) != null) {
-                try self.word.append(line[self.pos + 1]);
+                try self.appendLiteral(line[self.pos + 1]);
                 self.pos += 2;
                 continue;
             }
-            try self.word.append(c);
+            try self.appendLiteral(c);
             self.pos += 1;
         }
         return error.UnterminatedQuote;
@@ -192,7 +223,7 @@ pub const Parser = struct {
             var end = i;
             while (end < line.len and isNameChar(line[end], end == i)) end += 1;
             if (end == i) {
-                try self.word.append('$');
+                try self.appendLiteral('$');
                 self.in_word = true;
                 self.pos += 1;
                 return;
@@ -203,14 +234,14 @@ pub const Parser = struct {
         self.pos = i;
 
         if (quoted) {
-            try self.word.appendSlice(value);
+            try self.appendLiteralSlice(value);
             return;
         }
         for (value) |b| {
             if (b == ' ' or b == '\t' or b == '\n') {
                 try self.flushWord();
             } else {
-                try self.word.append(b);
+                try self.appendLiteral(b);
                 self.in_word = true;
             }
         }
