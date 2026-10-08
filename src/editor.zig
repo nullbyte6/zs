@@ -1,10 +1,17 @@
 const std = @import("std");
 const posix = std.posix;
 const highlight = @import("highlight.zig");
+const unicode = @import("unicode.zig");
+
+const Position = struct {
+    row: usize = 0,
+    col: usize = 0,
+};
 
 pub const Editor = struct {
     buffer: std.ArrayList(u8),
     cursor: usize = 0,
+    cursor_row: usize = 0,
     prompt: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, prompt: []const u8) Editor {
@@ -18,6 +25,7 @@ pub const Editor = struct {
     pub fn readLine(self: *Editor) !?[]const u8 {
         self.buffer.clearRetainingCapacity();
         self.cursor = 0;
+        self.cursor_row = 0;
 
         const original = posix.tcgetattr(posix.STDIN_FILENO) catch |err| switch (err) {
             error.NotATerminal => return self.readPlain(),
@@ -68,10 +76,12 @@ pub const Editor = struct {
             };
             switch (byte) {
                 '\r', '\n' => {
+                    try self.finishLine();
                     try stdout.writeAll("\r\n");
                     return self.buffer.items;
                 },
                 3 => {
+                    try self.finishLine();
                     try stdout.writeAll("^C\r\n");
                     self.buffer.clearRetainingCapacity();
                     self.cursor = 0;
@@ -180,15 +190,38 @@ pub const Editor = struct {
         }
     }
 
+    fn finishLine(self: *Editor) !void {
+        self.cursor = self.buffer.items.len;
+        try self.redraw();
+    }
+
     fn redraw(self: *Editor) !void {
+        const cols = terminalColumns();
         var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
         const w = bw.writer();
-        try w.writeAll("\r");
+
+        if (self.cursor_row > 0) try w.print("\x1b[{d}A", .{self.cursor_row});
+        try w.writeAll("\r\x1b[J");
         try w.writeAll(self.prompt);
         try highlight.render(w, self.buffer.items);
-        try w.writeAll("\x1b[K\r");
-        const col = columns(self.prompt) + columns(self.buffer.items[0..self.cursor]);
-        if (col > 0) try w.print("\x1b[{d}C", .{col});
+
+        var end = Position{};
+        advance(&end, self.prompt, cols);
+        advance(&end, self.buffer.items, cols);
+        if (end.col == cols) {
+            try w.writeAll("\r\n");
+            end = .{ .row = end.row + 1 };
+        }
+
+        var target = Position{};
+        advance(&target, self.prompt, cols);
+        advance(&target, self.buffer.items[0..self.cursor], cols);
+        if (target.col == cols) target = .{ .row = target.row + 1 };
+
+        if (end.row > target.row) try w.print("\x1b[{d}A", .{end.row - target.row});
+        try w.writeAll("\r");
+        if (target.col > 0) try w.print("\x1b[{d}C", .{target.col});
+        self.cursor_row = target.row;
         try bw.flush();
     }
 };
@@ -202,12 +235,22 @@ fn inputPending() !bool {
     return (try posix.poll(&fds, 50)) > 0;
 }
 
-fn columns(bytes: []const u8) usize {
-    var count: usize = 0;
-    for (bytes) |b| {
-        if (b & 0xc0 != 0x80) count += 1;
+fn advance(pos: *Position, text: []const u8, cols: usize) void {
+    var i: usize = 0;
+    while (i < text.len) {
+        const glyph = unicode.glyphAt(text, i);
+        i += glyph.len;
+        if (glyph.width == 0) continue;
+        if (pos.col + glyph.width > cols) pos.* = .{ .row = pos.row + 1 };
+        pos.col += glyph.width;
     }
-    return count;
+}
+
+fn terminalColumns() usize {
+    var ws: posix.winsize = undefined;
+    const rc = posix.system.ioctl(posix.STDOUT_FILENO, posix.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (posix.errno(rc) != .SUCCESS or ws.col < 2) return 80;
+    return ws.col;
 }
 
 fn prevBoundary(items: []const u8, pos: usize) usize {
