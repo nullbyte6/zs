@@ -38,3 +38,4 @@
 - Update highlighter for subshell parentheses and braced parameter expansions
 - Add completion candidates for commands, builtins, functions and file arguments
 - Add Tab completion to the line editor with common prefix insertion and candidate listing
+- Add install.sh to build zs and install it to /usr/local/bin
