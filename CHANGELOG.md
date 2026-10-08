@@ -37,3 +37,4 @@
 - Add subshells with ( ... ) and the ${var:-w}, ${var:=w}, ${var:+w}, ${var:?} and ${#var} expansions
 - Update highlighter for subshell parentheses and braced parameter expansions
 - Add completion candidates for commands, builtins, functions and file arguments
+- Add Tab completion to the line editor with common prefix insertion and candidate listing

@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const completion = @import("complete.zig");
 const highlight = @import("highlight.zig");
 const unicode = @import("unicode.zig");
 
@@ -118,6 +119,7 @@ pub const Editor = struct {
                     try self.deleteForward();
                 },
                 1 => self.cursor = 0,
+                9 => try self.complete(),
                 12 => {
                     try stdout.writeAll("\x1b[H\x1b[2J");
                     self.cursor_row = 0;
@@ -138,6 +140,74 @@ pub const Editor = struct {
             }
             try self.redraw();
         }
+    }
+
+    fn complete(self: *Editor) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const result = (try completion.complete(arena.allocator(), self.buffer.items, self.cursor)) orelse return;
+        const candidates = result.candidates;
+        if (candidates.len == 0) return;
+
+        var common = candidates[0].text;
+        for (candidates[1..]) |candidate| {
+            var len: usize = 0;
+            while (len < common.len and len < candidate.text.len and common[len] == candidate.text[len]) len += 1;
+            common = common[0..len];
+        }
+        while (common.len > 0 and common.len < candidates[0].text.len and (candidates[0].text[common.len] & 0xc0) == 0x80) {
+            common = common[0 .. common.len - 1];
+        }
+        var slashes: usize = 0;
+        while (slashes < common.len and common[common.len - 1 - slashes] == '\\') slashes += 1;
+        if (slashes % 2 == 1) common = common[0 .. common.len - 1];
+
+        if (candidates.len == 1) {
+            const suffix: []const u8 = if (candidates[0].is_dir) "" else " ";
+            const text = try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ candidates[0].text, suffix });
+            try self.replaceWord(result.start, text);
+        } else if (common.len > result.typed.len) {
+            try self.replaceWord(result.start, common);
+        } else {
+            try self.listCandidates(candidates);
+        }
+    }
+
+    fn replaceWord(self: *Editor, start: usize, text: []const u8) !void {
+        try self.buffer.replaceRange(start, self.cursor - start, text);
+        self.cursor = start + text.len;
+    }
+
+    fn listCandidates(self: *Editor, candidates: []const completion.Candidate) !void {
+        const stdout = std.io.getStdOut().writer();
+        const cols = terminalColumns();
+        const saved = self.cursor;
+        self.cursor = self.buffer.items.len;
+        try self.redraw();
+        self.cursor = saved;
+        try stdout.writeAll("\r\n");
+
+        var widest: usize = 0;
+        for (candidates) |candidate| widest = @max(widest, displayWidth(candidate.label));
+        const cell = widest + 2;
+        const per_row = @max(1, cols / cell);
+        const rows = (candidates.len + per_row - 1) / per_row;
+        var bw = std.io.bufferedWriter(stdout);
+        const w = bw.writer();
+        for (0..rows) |row| {
+            for (0..per_row) |column| {
+                const index = column * rows + row;
+                if (index >= candidates.len) break;
+                const label = candidates[index].label;
+                try w.writeAll(label);
+                if (index + rows < candidates.len) {
+                    for (0..cell - displayWidth(label)) |_| try w.writeByte(' ');
+                }
+            }
+            try w.writeAll("\r\n");
+        }
+        try bw.flush();
+        self.cursor_row = 0;
     }
 
     fn clearDraft(self: *Editor) void {
@@ -312,6 +382,12 @@ fn advance(pos: *Position, text: []const u8, cols: usize) void {
         if (pos.col + glyph.width > cols) pos.* = .{ .row = pos.row + 1 };
         pos.col += glyph.width;
     }
+}
+
+fn displayWidth(text: []const u8) usize {
+    var pos = Position{};
+    advance(&pos, text, std.math.maxInt(usize));
+    return pos.col;
 }
 
 fn terminalColumns() usize {
