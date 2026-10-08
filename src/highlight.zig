@@ -18,6 +18,9 @@ pub fn render(writer: anytype, line: []const u8) !void {
     var expect_command = true;
     var after_redirect = false;
     var for_state: u8 = 0;
+    var is_case = false;
+    var case_depth: usize = 0;
+    var in_patterns = false;
     while (i < line.len) {
         const c = line[i];
         if (isSpace(c)) {
@@ -33,6 +36,7 @@ pub fn render(writer: anytype, line: []const u8) !void {
                     expect_command = true;
                 }
             }
+            if (case_depth > 0 and std.mem.indexOf(u8, line[i..end], ";;") != null) in_patterns = true;
             try writer.writeAll(symbol_color);
             try writer.writeAll(line[i..end]);
             try writer.writeAll(reset);
@@ -44,6 +48,19 @@ pub fn render(writer: anytype, line: []const u8) !void {
                 try writer.writeAll(symbol_color);
                 try writer.writeAll(word);
                 try writer.writeAll(reset);
+            } else if (in_patterns) {
+                if (std.mem.eql(u8, word, "esac")) {
+                    try writeColored(writer, keyword_color, word);
+                    in_patterns = false;
+                    if (case_depth > 0) case_depth -= 1;
+                    expect_command = false;
+                } else {
+                    try renderWord(writer, word, argument_color);
+                    if (std.mem.indexOfScalar(u8, word, ')') != null) {
+                        in_patterns = false;
+                        expect_command = true;
+                    }
+                }
             } else if (after_redirect) {
                 try renderWord(writer, word, argument_color);
                 after_redirect = false;
@@ -52,6 +69,9 @@ pub fn render(writer: anytype, line: []const u8) !void {
                 if (std.mem.eql(u8, word, "for") or std.mem.eql(u8, word, "case") or std.mem.eql(u8, word, "select")) {
                     expect_command = false;
                     for_state = 1;
+                    is_case = std.mem.eql(u8, word, "case");
+                } else if (std.mem.eql(u8, word, "esac") and case_depth > 0) {
+                    case_depth -= 1;
                 }
             } else if (for_state == 1) {
                 try renderWord(writer, word, argument_color);
@@ -59,6 +79,10 @@ pub fn render(writer: anytype, line: []const u8) !void {
             } else if (for_state == 2 and std.mem.eql(u8, word, "in")) {
                 try writeColored(writer, keyword_color, word);
                 for_state = 0;
+                if (is_case) {
+                    case_depth += 1;
+                    in_patterns = true;
+                }
             } else if (expect_command and std.mem.startsWith(u8, word, "((")) {
                 try renderWord(writer, word, argument_color);
                 expect_command = false;

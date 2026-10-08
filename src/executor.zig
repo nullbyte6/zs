@@ -5,6 +5,7 @@ const vars = @import("vars.zig");
 const commands = @import("commands.zig");
 const ast = @import("ast.zig");
 const arith = @import("arith.zig");
+const glob = @import("glob.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -147,6 +148,19 @@ pub const Shell = struct {
                 self.last_status = status;
                 return .normal;
             },
+            .case_clause => |clause| {
+                const subject = try self.expandSingle(arena, clause.subject, .text, lines);
+                for (clause.arms) |arm| {
+                    for (arm.patterns) |pattern| {
+                        const compiled = try self.expandSingle(arena, pattern, .pattern, lines);
+                        if (!glob.match(compiled, subject)) continue;
+                        self.last_status = 0;
+                        return self.execList(arena, arm.body, lines);
+                    }
+                }
+                self.last_status = 0;
+                return .normal;
+            },
             .for_clause => |clause| {
                 const words = try self.expandWords(arena, clause.words, lines);
                 var status: u8 = 0;
@@ -241,6 +255,16 @@ pub const Shell = struct {
         p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
         const pipeline = (try p.next(self.last_status)) orelse return &.{};
         return pipeline.commands[0].argv;
+    }
+
+    fn expandSingle(self: *Shell, arena: std.mem.Allocator, text: []const u8, mode: parser.Mode, lines: ?parser.LineSource) anyerror![]const u8 {
+        var p = parser.Parser.init(arena, text);
+        p.mode = mode;
+        p.lines = lines;
+        p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
+        const pipeline = (try p.next(self.last_status)) orelse return "";
+        if (mode == .pattern) return p.last_pattern;
+        return if (pipeline.commands[0].argv.len > 0) pipeline.commands[0].argv[0] else "";
     }
 
     fn execLine(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!Flow {

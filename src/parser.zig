@@ -14,6 +14,8 @@ pub const Redirect = struct {
     both: bool = false,
 };
 
+pub const Mode = enum { words, text, pattern };
+
 pub const Substituter = struct {
     context: *anyopaque,
     run: *const fn (context: *anyopaque, arena: std.mem.Allocator, command: []const u8) Error![]const u8,
@@ -87,6 +89,8 @@ pub const Parser = struct {
     redirects: std.ArrayList(Redirect),
     pending_redirect: ?Redirect = null,
     word_quoted: bool = false,
+    mode: Mode = .words,
+    last_pattern: []const u8 = "",
     lines: ?LineSource = null,
     substitute: ?Substituter = null,
     words: std.ArrayList([]const u8),
@@ -195,7 +199,7 @@ pub const Parser = struct {
                     self.pos += 1;
                 },
                 '*', '?', '[' => {
-                    if (self.assign_name != null or self.pending_redirect != null) {
+                    if (self.assign_name != null or self.pending_redirect != null or self.mode == .text) {
                         try self.appendLiteral(c);
                     } else {
                         try self.word.append(c);
@@ -258,12 +262,15 @@ pub const Parser = struct {
         const literal = try self.word.toOwnedSlice();
         const pattern = try self.pattern.toOwnedSlice();
         self.in_word = false;
+        if (self.mode == .pattern) self.last_pattern = pattern;
         if (self.has_glob) {
             self.has_glob = false;
-            const matches = try glob.expand(self.arena, pattern);
-            if (matches.len > 0) {
-                try self.words.appendSlice(matches);
-                return;
+            if (self.mode == .words) {
+                const matches = try glob.expand(self.arena, pattern);
+                if (matches.len > 0) {
+                    try self.words.appendSlice(matches);
+                    return;
+                }
             }
         }
         try self.words.append(literal);
@@ -400,8 +407,9 @@ pub const Parser = struct {
     }
 
     fn appendExpansion(self: *Parser, value: []const u8, quoted: bool) Error!void {
-        if (quoted or self.assign_name != null or self.pending_redirect != null) {
+        if (quoted or self.assign_name != null or self.pending_redirect != null or self.mode != .words) {
             try self.appendLiteralSlice(value);
+            self.in_word = true;
             return;
         }
         for (value) |b| {

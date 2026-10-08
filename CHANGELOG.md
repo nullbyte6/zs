@@ -30,3 +30,4 @@
 - Fix command text being corrupted when continuation lines reuse the editor buffer
 - Update highlighter to color reserved words purple and brackets dark gray
 - Add pipes and redirections on compound commands and the read builtin
+- Add case statements with pattern matching and highlighted patterns
