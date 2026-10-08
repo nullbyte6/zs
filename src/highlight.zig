@@ -1,5 +1,6 @@
 const std = @import("std");
 const commands = @import("commands.zig");
+const arith = @import("arith.zig");
 const parser = @import("parser.zig");
 
 const reset = "\x1b[0m";
@@ -16,6 +17,7 @@ const dollar_color = "\x1b[38;5;208m";
 const keywords = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac", "function", "select" };
 
 pub fn render(writer: anytype, line: []const u8) !void {
+    if (arith.looksLikeExpression(line)) return writeColored(writer, argument_color, line);
     var i: usize = 0;
     var expect_command = true;
     var after_redirect = false;

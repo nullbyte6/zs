@@ -1,4 +1,5 @@
 const std = @import("std");
+const arith = @import("arith.zig");
 const Editor = @import("editor.zig").Editor;
 const executor = @import("executor.zig");
 const functions = @import("functions.zig");
@@ -130,6 +131,17 @@ pub fn main() !u8 {
         if (input.len == 0) continue;
 
         try editor.addHistory(input);
+
+        if (arith.looksLikeExpression(input)) {
+            if (arith.calculate(input)) |value| {
+                try stdout.print("{d}\n", .{value});
+                shell.last_status = 0;
+            } else |err| {
+                try stderr.print("zs: {s}\n", .{if (err == error.DivideByZero) "division by zero" else "syntax error in expression"});
+                shell.last_status = 1;
+            }
+            continue;
+        }
 
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();

@@ -4,8 +4,32 @@ const vars = @import("vars.zig");
 pub const Error = error{ Syntax, DivideByZero };
 
 pub fn eval(text: []const u8) Error!i64 {
+    return evaluate(text, false);
+}
+
+pub fn calculate(text: []const u8) Error!i64 {
+    return evaluate(text, true);
+}
+
+pub fn looksLikeExpression(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r");
+    if (trimmed.len == 0) return false;
+    const first = trimmed[0];
+    if (!(std.ascii.isDigit(first) or first == '(' or first == '-' or first == '+')) return false;
+    var has_digit = false;
+    for (trimmed) |c| {
+        if (std.ascii.isDigit(c)) {
+            has_digit = true;
+        } else if (std.mem.indexOfScalar(u8, "+-*/%() \t", c) == null) {
+            return false;
+        }
+    }
+    return has_digit;
+}
+
+fn evaluate(text: []const u8, calculator: bool) Error!i64 {
     if (std.mem.trim(u8, text, " \t\n").len == 0) return 0;
-    var evaluator = Evaluator{ .text = text };
+    var evaluator = Evaluator{ .text = text, .calculator = calculator };
     const value = try evaluator.assignment();
     evaluator.skip();
     if (evaluator.pos != text.len) return error.Syntax;
@@ -43,6 +67,7 @@ const binary_ops = [_]BinaryOp{
 const Evaluator = struct {
     text: []const u8,
     pos: usize = 0,
+    calculator: bool = false,
 
     fn skip(self: *Evaluator) void {
         while (self.pos < self.text.len and std.ascii.isWhitespace(self.text[self.pos])) self.pos += 1;
@@ -103,9 +128,13 @@ const Evaluator = struct {
         var left = try self.unary();
         while (true) {
             self.skip();
-            const op = self.peekOp() orelse break;
+            var implied = false;
+            const op = self.peekOp() orelse if (self.calculator and self.pos < self.text.len and self.text[self.pos] == '(') blk: {
+                implied = true;
+                break :blk BinaryOp{ .text = "*", .prec = 10 };
+            } else break;
             if (op.prec < min_prec) break;
-            self.pos += op.text.len;
+            if (!implied) self.pos += op.text.len;
             const right = try self.binary(if (op.right) op.prec else op.prec + 1);
             left = try combine(op.text, left, right);
         }
@@ -138,6 +167,7 @@ const Evaluator = struct {
             },
             '-' => {
                 self.pos += 1;
+                if (self.calculator) return 0 -% try self.binary(11);
                 return 0 -% try self.unary();
             },
             '!' => {
@@ -211,9 +241,14 @@ fn combine(op: []const u8, a: i64, b: i64) Error!i64 {
         return @rem(a, b);
     }
     if (std.mem.eql(u8, op, "**")) {
+        if (b < 0) return if (a == 1) 1 else if (a == -1) (if (@mod(b, 2) == 0) 1 else -1) else 0;
         var result: i64 = 1;
-        var i: i64 = 0;
-        while (i < b) : (i += 1) result *%= a;
+        var base = a;
+        var exponent = b;
+        while (exponent > 0) : (exponent >>= 1) {
+            if (exponent & 1 == 1) result *%= base;
+            base *%= base;
+        }
         return result;
     }
     if (std.mem.eql(u8, op, "<<")) return a << @as(u6, @intCast(b & 63));
