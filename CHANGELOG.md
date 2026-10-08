@@ -52,3 +52,4 @@
 - Fix accept -c, -l and -i options so zs works as a login shell
 - Add exec builtin to replace the shell process with a command
 - Add /etc/profile and ~/.profile loading for login shells
+- Add history-based inline suggestions accepted with Right arrow or End

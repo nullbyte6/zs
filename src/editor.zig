@@ -128,9 +128,9 @@ pub const Editor = struct {
                 },
                 14 => try self.historyNext(),
                 16 => try self.historyPrevious(),
-                5 => self.cursor = self.buffer.items.len,
+                5 => try self.cursorEnd(),
                 2 => self.cursor = prevBoundary(self.buffer.items, self.cursor),
-                6 => self.cursor = nextBoundary(self.buffer.items, self.cursor),
+                6 => try self.cursorRight(),
                 11 => self.buffer.shrinkRetainingCapacity(self.cursor),
                 21 => try self.deleteRange(0, self.cursor),
                 23 => try self.deleteWordBackward(),
@@ -175,6 +175,36 @@ pub const Editor = struct {
         }
     }
 
+    fn suggestion(self: *const Editor) ?[]const u8 {
+        const typed = self.buffer.items;
+        if (typed.len == 0 or self.cursor != typed.len or self.history_pos != self.history.items.len) return null;
+        var i = self.history.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = self.history.items[i];
+            if (entry.len > typed.len and std.mem.startsWith(u8, entry, typed) and std.mem.indexOfScalar(u8, entry, '\n') == null) {
+                return entry[typed.len..];
+            }
+        }
+        return null;
+    }
+
+    fn acceptSuggestion(self: *Editor) !void {
+        const text = self.suggestion() orelse return;
+        try self.buffer.appendSlice(text);
+        self.cursor = self.buffer.items.len;
+    }
+
+    fn cursorRight(self: *Editor) !void {
+        if (self.cursor >= self.buffer.items.len) return self.acceptSuggestion();
+        self.cursor = nextBoundary(self.buffer.items, self.cursor);
+    }
+
+    fn cursorEnd(self: *Editor) !void {
+        if (self.cursor == self.buffer.items.len) return self.acceptSuggestion();
+        self.cursor = self.buffer.items.len;
+    }
+
     fn replaceWord(self: *Editor, start: usize, text: []const u8) !void {
         try self.buffer.replaceRange(start, self.cursor - start, text);
         self.cursor = start + text.len;
@@ -185,7 +215,7 @@ pub const Editor = struct {
         const cols = terminalColumns();
         const saved = self.cursor;
         self.cursor = self.buffer.items.len;
-        try self.redraw();
+        try self.draw(false);
         self.cursor = saved;
         try stdout.writeAll("\r\n");
 
@@ -285,7 +315,7 @@ pub const Editor = struct {
         if (intro == 'O') {
             switch (try readByte()) {
                 'H' => self.cursor = 0,
-                'F' => self.cursor = self.buffer.items.len,
+                'F' => try self.cursorEnd(),
                 else => {},
             }
             return;
@@ -307,17 +337,17 @@ pub const Editor = struct {
         switch (final) {
             'A' => try self.historyPrevious(),
             'B' => try self.historyNext(),
-            'C' => self.cursor = nextBoundary(self.buffer.items, self.cursor),
+            'C' => try self.cursorRight(),
             'D' => self.cursor = prevBoundary(self.buffer.items, self.cursor),
             'H' => self.cursor = 0,
-            'F' => self.cursor = self.buffer.items.len,
+            'F' => try self.cursorEnd(),
             '~' => {
                 if (std.mem.eql(u8, param, "3")) {
                     try self.deleteForward();
                 } else if (std.mem.eql(u8, param, "1") or std.mem.eql(u8, param, "7")) {
                     self.cursor = 0;
                 } else if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8")) {
-                    self.cursor = self.buffer.items.len;
+                    try self.cursorEnd();
                 }
             },
             else => {},
@@ -326,11 +356,16 @@ pub const Editor = struct {
 
     fn finishLine(self: *Editor) !void {
         self.cursor = self.buffer.items.len;
-        try self.redraw();
+        try self.draw(false);
     }
 
     fn redraw(self: *Editor) !void {
+        try self.draw(true);
+    }
+
+    fn draw(self: *Editor, ghost: bool) !void {
         const cols = terminalColumns();
+        const hint: []const u8 = if (ghost) self.suggestion() orelse "" else "";
         var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
         const w = bw.writer();
 
@@ -340,10 +375,12 @@ pub const Editor = struct {
         try w.writeAll(self.prompt);
         if (self.marks) try w.writeAll("\x1b]133;B\x07");
         try highlight.render(w, self.buffer.items);
+        if (hint.len > 0) try w.print("\x1b[38;5;240m{s}\x1b[0m", .{hint});
 
         var end = Position{};
         advance(&end, self.prompt, cols);
         advance(&end, self.buffer.items, cols);
+        advance(&end, hint, cols);
         if (end.col == cols) {
             try w.writeAll("\r\n");
             end = .{ .row = end.row + 1 };
