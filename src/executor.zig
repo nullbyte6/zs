@@ -31,8 +31,9 @@ fn restoreDefaultSignals() void {
 pub const Shell = struct {
     last_status: u8 = 0,
 
-    pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8) !?u8 {
+    pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!?u8 {
         var p = parser.Parser.init(arena, line);
+        p.lines = lines;
         while (try p.next(self.last_status)) |pipeline| {
             const should_run = switch (pipeline.join) {
                 .always => true,
@@ -152,6 +153,28 @@ fn restoreStandardFds(saved: [3]?posix.fd_t) void {
 fn applyRedirects(redirects: []const parser.Redirect) bool {
     for (redirects) |redirect| {
         const fd: posix.fd_t = redirect.fd;
+        if (redirect.kind == .heredoc) {
+            const memory = posix.memfd_create("zs-heredoc", 0) catch {
+                printError("cannot create here-document", .{});
+                return false;
+            };
+            const file = std.fs.File{ .handle = memory };
+            file.writeAll(redirect.target) catch {
+                posix.close(memory);
+                printError("cannot write here-document", .{});
+                return false;
+            };
+            posix.lseek_SET(memory, 0) catch {};
+            if (memory != fd) {
+                posix.dup2(memory, fd) catch {
+                    posix.close(memory);
+                    printError("{d}: Bad file descriptor", .{fd});
+                    return false;
+                };
+                posix.close(memory);
+            }
+            continue;
+        }
         if (redirect.kind == .dup) {
             if (std.mem.eql(u8, redirect.target, "-")) {
                 posix.close(fd);
@@ -171,7 +194,7 @@ fn applyRedirects(redirects: []const parser.Redirect) bool {
             .read => .{ .ACCMODE = .RDONLY },
             .write => .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
             .append => .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
-            .dup => unreachable,
+            .dup, .heredoc => unreachable,
         };
         const opened = posix.open(redirect.target, flags, 0o666) catch |err| {
             printError("{s}: {s}", .{ redirect.target, describe(err) });

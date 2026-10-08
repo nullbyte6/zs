@@ -5,6 +5,16 @@ const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
 const vars = @import("vars.zig");
 
+fn nextContinuationLine(context: *anyopaque, arena: std.mem.Allocator) ?[]const u8 {
+    const editor: *Editor = @ptrCast(@alignCast(context));
+    const saved = editor.prompt;
+    editor.prompt = "> ";
+    defer editor.prompt = saved;
+    const maybe = editor.readLine() catch return null;
+    const line = maybe orelse return null;
+    return arena.dupe(u8, line) catch null;
+}
+
 pub fn main() !u8 {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -35,7 +45,7 @@ pub fn main() !u8 {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        const exit_code = shell.run(arena.allocator(), input) catch |err| {
+        const exit_code = shell.run(arena.allocator(), input, .{ .context = &editor, .next = nextContinuationLine }) catch |err| {
             if (parser.message(err)) |text| {
                 try stderr.print("zs: {s}\n", .{text});
                 shell.last_status = 2;

@@ -3,12 +3,18 @@ const posix = std.posix;
 const glob = @import("glob.zig");
 const vars = @import("vars.zig");
 
-pub const RedirectKind = enum { read, write, append, dup };
+pub const RedirectKind = enum { read, write, append, dup, heredoc };
 
 pub const Redirect = struct {
     fd: u8,
     kind: RedirectKind,
     target: []const u8 = "",
+    strip_tabs: bool = false,
+};
+
+pub const LineSource = struct {
+    context: *anyopaque,
+    next: *const fn (context: *anyopaque, arena: std.mem.Allocator) ?[]const u8,
 };
 
 pub const Command = struct {
@@ -45,6 +51,11 @@ pub fn message(err: anyerror) ?[]const u8 {
     };
 }
 
+const Expansion = struct {
+    value: []const u8,
+    end: usize,
+};
+
 pub const Parser = struct {
     arena: std.mem.Allocator,
     line: []const u8,
@@ -59,6 +70,8 @@ pub const Parser = struct {
     assignments: std.ArrayList(vars.Assignment),
     redirects: std.ArrayList(Redirect),
     pending_redirect: ?Redirect = null,
+    word_quoted: bool = false,
+    lines: ?LineSource = null,
     words: std.ArrayList([]const u8),
     commands: std.ArrayList(Command),
     pending_join: Join = .always,
@@ -89,6 +102,7 @@ pub const Parser = struct {
                 },
                 '\'' => {
                     self.plain = false;
+                    self.word_quoted = true;
                     const end = std.mem.indexOfScalarPos(u8, line, self.pos + 1, '\'') orelse return error.UnterminatedQuote;
                     try self.appendLiteralSlice(line[self.pos + 1 .. end]);
                     self.in_word = true;
@@ -96,10 +110,12 @@ pub const Parser = struct {
                 },
                 '"' => {
                     self.plain = false;
+                    self.word_quoted = true;
                     try self.doubleQuoted();
                 },
                 '\\' => {
                     self.plain = false;
+                    self.word_quoted = true;
                     if (self.pos + 1 < line.len) {
                         try self.appendLiteral(line[self.pos + 1]);
                         self.pos += 2;
@@ -185,10 +201,13 @@ pub const Parser = struct {
     fn flushWord(self: *Parser) Error!void {
         if (!self.in_word) return;
         self.plain = true;
+        const quoted_word = self.word_quoted;
+        self.word_quoted = false;
         if (self.pending_redirect) |pending| {
             var done = pending;
-            done.target = try self.word.toOwnedSlice();
+            const text = try self.word.toOwnedSlice();
             self.pattern.clearRetainingCapacity();
+            done.target = if (done.kind == .heredoc) try self.readHeredoc(text, done.strip_tabs, quoted_word) else text;
             try self.redirects.append(done);
             self.pending_redirect = null;
             self.has_glob = false;
@@ -260,6 +279,7 @@ pub const Parser = struct {
         if (self.pending_redirect != null) return error.MissingTarget;
 
         var kind: RedirectKind = if (op == '<') .read else .write;
+        var strip = false;
         self.pos += 1;
         if (op == '>' and self.pos < line.len) {
             if (line[self.pos] == '>') {
@@ -269,10 +289,18 @@ pub const Parser = struct {
                 kind = .dup;
                 self.pos += 1;
             }
-        } else if (op == '<' and self.pos < line.len and (line[self.pos] == '<' or line[self.pos] == '>')) {
+        } else if (op == '<' and self.pos < line.len and line[self.pos] == '>') {
             return error.UnsupportedOperator;
+        } else if (op == '<' and self.pos < line.len and line[self.pos] == '<') {
+            self.pos += 1;
+            if (self.pos < line.len and line[self.pos] == '<') return error.UnsupportedOperator;
+            kind = .heredoc;
+            if (self.pos < line.len and line[self.pos] == '-') {
+                strip = true;
+                self.pos += 1;
+            }
         }
-        self.pending_redirect = .{ .fd = fd, .kind = kind };
+        self.pending_redirect = .{ .fd = fd, .kind = kind, .strip_tabs = strip };
     }
 
     fn peek(self: *Parser, expected: u8) bool {
@@ -305,37 +333,18 @@ pub const Parser = struct {
     }
 
     fn expandVariable(self: *Parser, quoted: bool) Error!void {
-        const line = self.line;
-        var i = self.pos + 1;
-        var value: []const u8 = "";
-        if (i < line.len and line[i] == '?') {
-            value = try std.fmt.allocPrint(self.arena, "{d}", .{self.last_status});
-            i += 1;
-        } else if (i < line.len and line[i] == '{') {
-            const end = std.mem.indexOfScalarPos(u8, line, i + 1, '}') orelse return error.BadSubstitution;
-            const name = line[i + 1 .. end];
-            if (!isName(name)) return error.BadSubstitution;
-            value = vars.get(name) orelse "";
-            i = end + 1;
-        } else {
-            var end = i;
-            while (end < line.len and isNameChar(line[end], end == i)) end += 1;
-            if (end == i) {
-                try self.appendLiteral('$');
-                self.in_word = true;
-                self.pos += 1;
-                return;
-            }
-            value = vars.get(line[i..end]) orelse "";
-            i = end;
-        }
-        self.pos = i;
-
+        const expansion = try self.dollar(self.line, self.pos) orelse {
+            try self.appendLiteral('$');
+            self.in_word = true;
+            self.pos += 1;
+            return;
+        };
+        self.pos = expansion.end;
         if (quoted or self.assign_name != null or self.pending_redirect != null) {
-            try self.appendLiteralSlice(value);
+            try self.appendLiteralSlice(expansion.value);
             return;
         }
-        for (value) |b| {
+        for (expansion.value) |b| {
             if (b == ' ' or b == '\t' or b == '\n') {
                 try self.flushWord();
             } else {
@@ -343,6 +352,60 @@ pub const Parser = struct {
                 self.in_word = true;
             }
         }
+    }
+
+    fn dollar(self: *Parser, text: []const u8, start: usize) Error!?Expansion {
+        const i = start + 1;
+        if (i < text.len and text[i] == '?') {
+            return .{ .value = try std.fmt.allocPrint(self.arena, "{d}", .{self.last_status}), .end = i + 1 };
+        }
+        if (i < text.len and text[i] == '{') {
+            const end = std.mem.indexOfScalarPos(u8, text, i + 1, '}') orelse return error.BadSubstitution;
+            const name = text[i + 1 .. end];
+            if (!isName(name)) return error.BadSubstitution;
+            return .{ .value = vars.get(name) orelse "", .end = end + 1 };
+        }
+        var end = i;
+        while (end < text.len and isNameChar(text[end], end == i)) end += 1;
+        if (end == i) return null;
+        return .{ .value = vars.get(text[i..end]) orelse "", .end = end };
+    }
+
+    fn readHeredoc(self: *Parser, delimiter: []const u8, strip_tabs: bool, quoted: bool) Error![]const u8 {
+        const source = self.lines orelse return error.UnsupportedOperator;
+        var body = std.ArrayList(u8).init(self.arena);
+        while (source.next(source.context, self.arena)) |raw| {
+            const line = if (strip_tabs) std.mem.trimLeft(u8, raw, "\t") else raw;
+            if (std.mem.eql(u8, line, delimiter)) break;
+            try body.appendSlice(line);
+            try body.append('\n');
+        }
+        if (quoted) return body.items;
+        return self.expandBody(body.items);
+    }
+
+    fn expandBody(self: *Parser, text: []const u8) Error![]const u8 {
+        var out = std.ArrayList(u8).init(self.arena);
+        var i: usize = 0;
+        while (i < text.len) {
+            const c = text[i];
+            if (c == '\\' and i + 1 < text.len and std.mem.indexOfScalar(u8, "$`\\", text[i + 1]) != null) {
+                try out.append(text[i + 1]);
+                i += 2;
+            } else if (c == '$') {
+                if (try self.dollar(text, i)) |expansion| {
+                    try out.appendSlice(expansion.value);
+                    i = expansion.end;
+                } else {
+                    try out.append('$');
+                    i += 1;
+                }
+            } else {
+                try out.append(c);
+                i += 1;
+            }
+        }
+        return out.items;
     }
 };
 
