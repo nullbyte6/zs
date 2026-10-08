@@ -15,3 +15,4 @@
 - Add variable expansion for $VAR, ${VAR} and $? with lazily parsed command lists
 - Add && and || operators for conditional command lists
 - Add glob expansion for *, ? and [...] patterns
+- Add user, host and working directory to the prompt

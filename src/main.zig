@@ -2,8 +2,7 @@ const std = @import("std");
 const Editor = @import("editor.zig").Editor;
 const executor = @import("executor.zig");
 const parser = @import("parser.zig");
-
-const prompt = " >> ";
+const prompt = @import("prompt.zig");
 
 pub fn main() !u8 {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -15,10 +14,12 @@ pub fn main() !u8 {
     if (std.io.getStdIn().isTty()) executor.ignoreInteractiveSignals();
 
     var shell = executor.Shell{};
-    var editor = Editor.init(allocator, prompt);
+    var editor = Editor.init(allocator, "");
     defer editor.deinit();
 
+    var prompt_buf: [1024]u8 = undefined;
     while (true) {
+        editor.prompt = prompt.build(&prompt_buf);
         const line = try editor.readLine() orelse break;
 
         const input = std.mem.trim(u8, line, " \t\r");
