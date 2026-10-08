@@ -15,7 +15,7 @@ pub fn build(buf: []u8, color: bool) []const u8 {
     var home_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const shown = abbreviateHome(&home_cwd_buf, cwd);
 
-    if (!color) return std.fmt.bufPrint(buf, "{s}@{s} {s}>> ", .{ user, host, shown }) catch fallback;
+    if (!color) return std.fmt.bufPrint(buf, "{s}@{s} {s} >> ", .{ user, host, shown }) catch fallback;
     return std.fmt.bufPrint(
         buf,
         "\x1b[1;32m{s}@{s}\x1b[0m \x1b[1;34m{s}\x1b[0m\x1b[1;33m>>\x1b[0m ",
