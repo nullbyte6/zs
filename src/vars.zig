@@ -23,6 +23,7 @@ const Frame = struct {
 };
 
 var frames: std.ArrayListUnmanaged(Frame) = .{};
+var top_params: std.ArrayListUnmanaged([]u8) = .{};
 
 pub fn init(gpa: std.mem.Allocator) !void {
     allocator = gpa;
@@ -47,6 +48,8 @@ pub fn deinit() void {
     while (export_it.next()) |key| allocator.free(key.*);
     exported.deinit(allocator);
     frames.deinit(allocator);
+    for (top_params.items) |param| allocator.free(param);
+    top_params.deinit(allocator);
 }
 
 pub fn get(name: []const u8) ?[]const u8 {
@@ -150,18 +153,42 @@ fn freeFrame(frame: *Frame) void {
     frame.saved.deinit(allocator);
 }
 
+fn currentParams() *std.ArrayListUnmanaged([]u8) {
+    if (frames.items.len == 0) return &top_params;
+    return &frames.items[frames.items.len - 1].params;
+}
+
 pub fn params() []const []u8 {
-    if (frames.items.len == 0) return &.{};
-    return frames.items[frames.items.len - 1].params.items;
+    return currentParams().items;
+}
+
+pub fn setParams(args: []const []const u8) !void {
+    var fresh = std.ArrayListUnmanaged([]u8){};
+    errdefer {
+        for (fresh.items) |param| allocator.free(param);
+        fresh.deinit(allocator);
+    }
+    for (args) |arg| try fresh.append(allocator, try allocator.dupe(u8, arg));
+    const list = currentParams();
+    for (list.items) |param| allocator.free(param);
+    list.deinit(allocator);
+    list.* = fresh;
 }
 
 pub fn shift(count: usize) bool {
-    if (frames.items.len == 0) return count == 0;
-    const frame = &frames.items[frames.items.len - 1];
-    if (count > frame.params.items.len) return false;
-    for (frame.params.items[0..count]) |param| allocator.free(param);
-    frame.params.replaceRange(allocator, 0, count, &.{}) catch {};
+    const list = currentParams();
+    if (count > list.items.len) return false;
+    for (list.items[0..count]) |param| allocator.free(param);
+    list.replaceRange(allocator, 0, count, &.{}) catch {};
     return true;
+}
+
+pub fn variableNames(arena: std.mem.Allocator) ![][]const u8 {
+    var list = std.ArrayList([]const u8).init(arena);
+    var it = values.keyIterator();
+    while (it.next()) |key| try list.append(key.*);
+    std.mem.sort([]const u8, list.items, {}, lessThan);
+    return list.items;
 }
 
 pub fn inFunction() bool {

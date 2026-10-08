@@ -43,3 +43,4 @@
 - Add ~/.zsrc loading on interactive start with red errors and yellow warnings
 - Add source and . builtins to run a file, reloading ~/.zsrc when called without arguments
 - Update install.sh to offer adding zs to /etc/shells
+- Add set builtin with set -- to replace positional parameters and set alone to list variables

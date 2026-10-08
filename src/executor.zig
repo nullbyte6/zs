@@ -503,6 +503,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "set")) return .{ .status = setParameters(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "shift")) return .{ .status = shiftParameters(argv[1..]) };
@@ -781,6 +782,29 @@ fn promptCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
     const unknown = prompts.unknownEscapes(arena, arg) catch return 1;
     if (unknown.len > 0) diag.warning("zsprompt: unknown escapes kept literally: {s}", .{unknown});
     prompts.setFormat(arg) catch {
+        printError("out of memory", .{});
+        return 1;
+    };
+    return 0;
+}
+
+fn setParameters(arena: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len == 0) {
+        const names = vars.variableNames(arena) catch return 1;
+        const stdout = std.io.getStdOut().writer();
+        for (names) |name| {
+            stdout.print("{s}={s}\n", .{ name, vars.get(name) orelse "" }) catch return 1;
+        }
+        return 0;
+    }
+    var rest = args;
+    if (std.mem.eql(u8, args[0], "--")) {
+        rest = args[1..];
+    } else if (args[0].len > 1 and (args[0][0] == '-' or args[0][0] == '+')) {
+        printError("set: {s}: invalid option", .{args[0]});
+        return 2;
+    }
+    vars.setParams(rest) catch {
         printError("out of memory", .{});
         return 1;
     };
