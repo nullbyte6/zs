@@ -581,6 +581,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
         if (std.mem.eql(u8, name, ":")) return .{ .status = 0 };
+        if (std.mem.eql(u8, name, "exec")) return .{ .status = replaceProcess(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "set")) return .{ .status = self.setOptions(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
@@ -983,6 +984,12 @@ fn exitShell(last_status: u8, args: []const []const u8) Outcome {
         return .{ .exit = 2 };
     };
     return .{ .exit = @intCast(@mod(code, 256)) };
+}
+
+fn replaceProcess(arena: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len == 0) return 0;
+    restoreDefaultSignals();
+    execute(arena, .{ .argv = args });
 }
 
 fn execute(arena: std.mem.Allocator, cmd: parser.Command) noreturn {
