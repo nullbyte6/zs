@@ -9,3 +9,4 @@
 - Add live syntax highlighting for commands, arguments, strings and flags
 - Fix prompt redraw for wrapped lines and wide characters
 - Add history navigation with up/down arrows and Ctrl-L screen clear
+- Add command validation so only builtins and executables on PATH are highlighted as commands

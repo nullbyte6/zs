@@ -1,7 +1,9 @@
 const std = @import("std");
+const commands = @import("commands.zig");
 
 const reset = "\x1b[0m";
 const command_color = "\x1b[33m";
+const invalid_color = "\x1b[31m";
 const argument_color = "\x1b[34m";
 const string_color = "\x1b[36m";
 const flag_color = "\x1b[90m";
@@ -19,35 +21,76 @@ pub fn render(writer: anytype, line: []const u8) !void {
             expect_command = true;
             i += 1;
         } else {
-            const color = if (expect_command) command_color else if (c == '-') flag_color else argument_color;
-            i = try renderWord(writer, line, i, color);
+            const end = wordEnd(line, i);
+            const word = line[i..end];
+            const color = if (expect_command) commandColor(word) else if (c == '-') flag_color else argument_color;
+            try renderWord(writer, word, color);
             expect_command = false;
+            i = end;
         }
     }
 }
 
-fn renderWord(writer: anytype, line: []const u8, start: usize, color: []const u8) !usize {
+fn commandColor(word: []const u8) []const u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const name = unquote(&buf, word) orelse return invalid_color;
+    return if (commands.exists(name)) command_color else invalid_color;
+}
+
+fn wordEnd(line: []const u8, start: usize) usize {
     var i = start;
     while (i < line.len and !isSpace(line[i]) and !isOperator(line[i])) {
-        const c = line[i];
-        if (c == '\'' or c == '"') {
-            const end = quoteEnd(line, i);
-            try writer.writeAll(string_color);
-            try writer.writeAll(line[i..end]);
-            try writer.writeAll(reset);
-            i = end;
-        } else {
-            var end = i;
-            while (end < line.len and !isSpace(line[end]) and !isOperator(line[end]) and line[end] != '\'' and line[end] != '"') {
-                end += if (line[end] == '\\' and end + 1 < line.len) 2 else 1;
-            }
-            try writer.writeAll(color);
-            try writer.writeAll(line[i..end]);
-            try writer.writeAll(reset);
-            i = end;
+        switch (line[i]) {
+            '\'', '"' => i = quoteEnd(line, i),
+            '\\' => i += if (i + 1 < line.len) 2 else 1,
+            else => i += 1,
         }
     }
     return i;
+}
+
+fn renderWord(writer: anytype, word: []const u8, color: []const u8) !void {
+    var i: usize = 0;
+    while (i < word.len) {
+        const quoted = word[i] == '\'' or word[i] == '"';
+        var end = i;
+        if (quoted) {
+            end = quoteEnd(word, i);
+        } else {
+            while (end < word.len and word[end] != '\'' and word[end] != '"') {
+                end += if (word[end] == '\\' and end + 1 < word.len) 2 else 1;
+            }
+        }
+        try writer.writeAll(if (quoted) string_color else color);
+        try writer.writeAll(word[i..end]);
+        try writer.writeAll(reset);
+        i = end;
+    }
+}
+
+fn unquote(buf: []u8, word: []const u8) ?[]const u8 {
+    var len: usize = 0;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < word.len) : (i += 1) {
+        const c = word[i];
+        if (quote != 0) {
+            if (c == quote) {
+                quote = 0;
+                continue;
+            }
+            if (quote == '"' and c == '\\' and i + 1 < word.len) i += 1;
+        } else if (c == '\'' or c == '"') {
+            quote = c;
+            continue;
+        } else if (c == '\\' and i + 1 < word.len) {
+            i += 1;
+        }
+        if (len == buf.len) return null;
+        buf[len] = word[i];
+        len += 1;
+    }
+    return buf[0..len];
 }
 
 fn quoteEnd(line: []const u8, start: usize) usize {
