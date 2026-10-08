@@ -300,6 +300,12 @@ fn inputPending() !bool {
 fn advance(pos: *Position, text: []const u8, cols: usize) void {
     var i: usize = 0;
     while (i < text.len) {
+        if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '[') {
+            i += 2;
+            while (i < text.len and (text[i] < 0x40 or text[i] > 0x7e)) i += 1;
+            i += 1;
+            continue;
+        }
         const glyph = unicode.glyphAt(text, i);
         i += glyph.len;
         if (glyph.width == 0) continue;

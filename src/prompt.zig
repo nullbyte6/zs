@@ -3,7 +3,7 @@ const posix = std.posix;
 
 const fallback = " >> ";
 
-pub fn build(buf: []u8) []const u8 {
+pub fn build(buf: []u8, color: bool) []const u8 {
     var host_buf: [posix.HOST_NAME_MAX]u8 = undefined;
     const full_host = posix.gethostname(&host_buf) catch "localhost";
     const host = full_host[0 .. std.mem.indexOfScalar(u8, full_host, '.') orelse full_host.len];
@@ -15,7 +15,12 @@ pub fn build(buf: []u8) []const u8 {
     var home_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const shown = abbreviateHome(&home_cwd_buf, cwd);
 
-    return std.fmt.bufPrint(buf, "{s}@{s} {s}>> ", .{ user, host, shown }) catch fallback;
+    if (!color) return std.fmt.bufPrint(buf, "{s}@{s} {s}>> ", .{ user, host, shown }) catch fallback;
+    return std.fmt.bufPrint(
+        buf,
+        "\x1b[1;32m{s}@{s}\x1b[0m \x1b[1;34m{s}\x1b[0m\x1b[1;33m>>\x1b[0m ",
+        .{ user, host, shown },
+    ) catch fallback;
 }
 
 fn abbreviateHome(buf: []u8, cwd: []const u8) []const u8 {

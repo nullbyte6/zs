@@ -16,3 +16,4 @@
 - Add && and || operators for conditional command lists
 - Add glob expansion for *, ? and [...] patterns
 - Add user, host and working directory to the prompt
+- Add colors to the prompt and ignore escape sequences when measuring its width

@@ -11,7 +11,8 @@ pub fn main() !u8 {
 
     const stderr = std.io.getStdErr().writer();
 
-    if (std.io.getStdIn().isTty()) executor.ignoreInteractiveSignals();
+    const interactive = std.io.getStdIn().isTty();
+    if (interactive) executor.ignoreInteractiveSignals();
 
     var shell = executor.Shell{};
     var editor = Editor.init(allocator, "");
@@ -19,7 +20,7 @@ pub fn main() !u8 {
 
     var prompt_buf: [1024]u8 = undefined;
     while (true) {
-        editor.prompt = prompt.build(&prompt_buf);
+        editor.prompt = prompt.build(&prompt_buf, interactive);
         const line = try editor.readLine() orelse break;
 
         const input = std.mem.trim(u8, line, " \t\r");
