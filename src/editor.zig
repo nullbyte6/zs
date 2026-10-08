@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const highlight = @import("highlight.zig");
 
 pub const Editor = struct {
     buffer: std.ArrayList(u8),
@@ -184,7 +185,7 @@ pub const Editor = struct {
         const w = bw.writer();
         try w.writeAll("\r");
         try w.writeAll(self.prompt);
-        try w.writeAll(self.buffer.items);
+        try highlight.render(w, self.buffer.items);
         try w.writeAll("\x1b[K\r");
         const col = columns(self.prompt) + columns(self.buffer.items[0..self.cursor]);
         if (col > 0) try w.print("\x1b[{d}C", .{col});
