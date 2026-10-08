@@ -102,7 +102,11 @@ pub const Shell = struct {
                 defer leaf.deinit();
                 return self.execLine(leaf.allocator(), text, lines);
             },
-            .arith => |expression| {
+            .arith => |text| {
+                var p = parser.Parser.init(arena, text);
+                p.last_status = self.last_status;
+                p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
+                const expression = try p.expandBody(text);
                 const value = arith.eval(expression) catch |err| {
                     printError("{s}", .{if (err == error.DivideByZero) "division by zero in arithmetic expression" else "syntax error in arithmetic expression"});
                     self.last_status = 1;
@@ -434,6 +438,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "shift")) return .{ .status = shiftParameters(argv[1..]) };
         if (std.mem.eql(u8, name, "local")) return .{ .status = localVariables(argv[1..]) };
         if (std.mem.eql(u8, name, "return")) return self.returnFromFunction(argv[1..]);
         if (std.mem.eql(u8, name, "read")) return .{ .status = readLine(argv[1..]) };
@@ -681,6 +686,19 @@ fn exportVariables(arena: std.mem.Allocator, args: []const []const u8) u8 {
         };
     }
     return status;
+}
+
+fn shiftParameters(args: []const []const u8) u8 {
+    var count: usize = 1;
+    if (args.len > 0) {
+        count = std.fmt.parseInt(usize, args[0], 10) catch {
+            printError("shift: {s}: numeric argument required", .{args[0]});
+            return 2;
+        };
+    }
+    if (vars.shift(count)) return 0;
+    if (args.len > 0) printError("shift: shift count out of range", .{});
+    return 1;
 }
 
 fn localVariables(args: []const []const u8) u8 {

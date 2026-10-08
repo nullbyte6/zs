@@ -5,6 +5,8 @@ pub const Assignment = struct {
     value: []const u8,
 };
 
+pub var shell_pid: i32 = 0;
+
 var allocator: std.mem.Allocator = undefined;
 var values: std.StringHashMapUnmanaged([]u8) = .{};
 var exported: std.StringHashMapUnmanaged(void) = .{};
@@ -24,6 +26,7 @@ var frames: std.ArrayListUnmanaged(Frame) = .{};
 
 pub fn init(gpa: std.mem.Allocator) !void {
     allocator = gpa;
+    shell_pid = std.os.linux.getpid();
     for (std.os.environ) |entry_z| {
         const entry = std.mem.span(entry_z);
         const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
@@ -145,6 +148,20 @@ fn freeFrame(frame: *Frame) void {
         if (entry.value) |value| allocator.free(value);
     }
     frame.saved.deinit(allocator);
+}
+
+pub fn params() []const []u8 {
+    if (frames.items.len == 0) return &.{};
+    return frames.items[frames.items.len - 1].params.items;
+}
+
+pub fn shift(count: usize) bool {
+    if (frames.items.len == 0) return count == 0;
+    const frame = &frames.items[frames.items.len - 1];
+    if (count > frame.params.items.len) return false;
+    for (frame.params.items[0..count]) |param| allocator.free(param);
+    frame.params.replaceRange(allocator, 0, count, &.{}) catch {};
+    return true;
 }
 
 pub fn inFunction() bool {

@@ -90,6 +90,7 @@ pub const Parser = struct {
     pending_redirect: ?Redirect = null,
     word_quoted: bool = false,
     mode: Mode = .words,
+    at_empty: bool = false,
     last_pattern: []const u8 = "",
     lines: ?LineSource = null,
     substitute: ?Substituter = null,
@@ -362,12 +363,19 @@ pub const Parser = struct {
 
     fn doubleQuoted(self: *Parser) Error!void {
         const line = self.line;
+        const was_in_word = self.in_word;
+        self.at_empty = false;
         self.in_word = true;
         self.pos += 1;
         while (self.pos < line.len) {
             const c = line[self.pos];
             if (c == '"') {
                 self.pos += 1;
+                if (self.at_empty and !was_in_word and self.word.items.len == 0) {
+                    self.in_word = false;
+                    self.plain = true;
+                    self.word_quoted = false;
+                }
                 return;
             }
             if (c == '$') {
@@ -389,7 +397,31 @@ pub const Parser = struct {
         return error.UnterminatedQuote;
     }
 
+    fn quotedAtEnd(self: *Parser) ?usize {
+        const line = self.line;
+        if (std.mem.startsWith(u8, line[self.pos..], "$@")) return self.pos + 2;
+        if (std.mem.startsWith(u8, line[self.pos..], "${@}")) return self.pos + 4;
+        return null;
+    }
+
+    fn expandAt(self: *Parser) Error!void {
+        const items = vars.params();
+        if (items.len == 0) self.at_empty = true;
+        for (items, 0..) |item, index| {
+            if (index > 0) try self.flushWord();
+            try self.appendLiteralSlice(item);
+            self.in_word = true;
+        }
+    }
+
     fn expandVariable(self: *Parser, quoted: bool) Error!void {
+        if (quoted and self.mode == .words and self.assign_name == null and self.pending_redirect == null) {
+            if (self.quotedAtEnd()) |end| {
+                try self.expandAt();
+                self.pos = end;
+                return;
+            }
+        }
         const expansion = try self.dollar(self.line, self.pos) orelse {
             try self.appendLiteral('$');
             self.in_word = true;
@@ -453,12 +485,13 @@ pub const Parser = struct {
             }
             return .{ .value = try self.substituteCommand(text[i + 1 .. close]), .end = close + 1 };
         }
-        if (i < text.len and text[i] == '?') {
-            return .{ .value = try std.fmt.allocPrint(self.arena, "{d}", .{self.last_status}), .end = i + 1 };
+        if (i < text.len and (std.mem.indexOfScalar(u8, "?#$@*", text[i]) != null or std.ascii.isDigit(text[i]))) {
+            return .{ .value = try self.special(text[i .. i + 1]), .end = i + 1 };
         }
         if (i < text.len and text[i] == '{') {
             const end = std.mem.indexOfScalarPos(u8, text, i + 1, '}') orelse return error.BadSubstitution;
             const name = text[i + 1 .. end];
+            if (isSpecialName(name)) return .{ .value = try self.special(name), .end = end + 1 };
             if (!isName(name)) return error.BadSubstitution;
             return .{ .value = vars.get(name) orelse "", .end = end + 1 };
         }
@@ -466,6 +499,26 @@ pub const Parser = struct {
         while (end < text.len and isNameChar(text[end], end == i)) end += 1;
         if (end == i) return null;
         return .{ .value = vars.get(text[i..end]) orelse "", .end = end };
+    }
+
+    fn special(self: *Parser, name: []const u8) Error![]const u8 {
+        if (name.len == 1) {
+            switch (name[0]) {
+                '?' => return std.fmt.allocPrint(self.arena, "{d}", .{self.last_status}),
+                '#' => return std.fmt.allocPrint(self.arena, "{d}", .{vars.params().len}),
+                '$' => return std.fmt.allocPrint(self.arena, "{d}", .{vars.shell_pid}),
+                '@', '*' => {
+                    const ifs = vars.get("IFS") orelse " \t\n";
+                    const separator: []const u8 = if (name[0] == '*' and ifs.len > 0) ifs[0..1] else " ";
+                    return std.mem.join(self.arena, separator, vars.params());
+                },
+                else => {},
+            }
+        }
+        const index = std.fmt.parseInt(usize, name, 10) catch return "";
+        if (index == 0) return "zs";
+        if (index > vars.params().len) return "";
+        return vars.params()[index - 1];
     }
 
     fn readHeredoc(self: *Parser, delimiter: []const u8, strip_tabs: bool, quoted: bool) Error![]const u8 {
@@ -481,7 +534,7 @@ pub const Parser = struct {
         return self.expandBody(body.items);
     }
 
-    fn expandBody(self: *Parser, text: []const u8) Error![]const u8 {
+    pub fn expandBody(self: *Parser, text: []const u8) Error![]const u8 {
         var out = std.ArrayList(u8).init(self.arena);
         var i: usize = 0;
         while (i < text.len) {
@@ -542,6 +595,11 @@ fn isDigits(text: []const u8) bool {
         if (!std.ascii.isDigit(c)) return false;
     }
     return true;
+}
+
+fn isSpecialName(name: []const u8) bool {
+    if (name.len == 1 and std.mem.indexOfScalar(u8, "?#$@*", name[0]) != null) return true;
+    return isDigits(name);
 }
 
 pub fn isName(name: []const u8) bool {

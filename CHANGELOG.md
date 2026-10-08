@@ -32,3 +32,4 @@
 - Add pipes and redirections on compound commands and the read builtin
 - Add case statements with pattern matching and highlighted patterns
 - Add brace groups, shell functions with local variables, the return builtin and unset -f
+- Add positional parameters $1, ${N}, $@, $*, $#, $0 and $$ with the shift builtin and arithmetic command expansion
