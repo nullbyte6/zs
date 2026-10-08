@@ -1,14 +1,17 @@
 const std = @import("std");
 const posix = std.posix;
 
-pub const builtins = [_][]const u8{"exit"};
+pub const builtins = [_][]const u8{ "cd", "exit" };
 
 pub fn exists(name: []const u8) bool {
     if (name.len == 0) return false;
     for (builtins) |builtin| {
         if (std.mem.eql(u8, builtin, name)) return true;
     }
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return isExecutable(name);
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = expandHome(&home_buf, name) orelse name;
+    if (std.mem.indexOfScalar(u8, resolved, '/') != null) return isExecutable(resolved);
 
     const path = posix.getenv("PATH") orelse return false;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -18,6 +21,12 @@ pub fn exists(name: []const u8) bool {
         if (isExecutable(candidate)) return true;
     }
     return false;
+}
+
+fn expandHome(buf: []u8, name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, name, "~/")) return null;
+    const home = posix.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ home, name[1..] }) catch null;
 }
 
 fn isExecutable(path: []const u8) bool {

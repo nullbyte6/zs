@@ -11,3 +11,4 @@
 - Add history navigation with up/down arrows and Ctrl-L screen clear
 - Add command validation so only builtins and executables on PATH are highlighted as commands
 - Add command line parser for quotes, pipes, semicolons and tilde expansion
+- Add command execution with pipelines, cd and exit builtins, and interrupt handling
