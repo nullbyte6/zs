@@ -10,6 +10,8 @@ const string_color = "\x1b[36m";
 const flag_color = "\x1b[90m";
 const symbol_color = "\x1b[96m";
 const keyword_color = "\x1b[38;5;135m";
+const param_color = "\x1b[31m";
+const dollar_color = "\x1b[38;5;208m";
 
 const keywords = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac", "function", "select" };
 
@@ -208,6 +210,35 @@ fn renderPlain(writer: anytype, word: []const u8, start: usize, end: usize, colo
             i += 2;
             continue;
         }
+        if (c == '$') {
+            const tail = word[i + 1 .. end];
+            var consumed: usize = 0;
+            if (tail.len > 0 and tail[0] == '{') {
+                const close = std.mem.indexOfScalar(u8, tail, '}');
+                if (close != null and isSpecialParam(tail[1..close.?])) {
+                    if (run < i) try writeColored(writer, color, word[run..i]);
+                    try writeColored(writer, dollar_color, "$");
+                    try writeColored(writer, flag_color, "{");
+                    try writeColored(writer, param_color, tail[1..close.?]);
+                    try writeColored(writer, flag_color, "}");
+                    consumed = close.? + 2;
+                }
+            } else if (tail.len > 0 and (std.ascii.isDigit(tail[0]) or std.mem.indexOfScalar(u8, "@*#?$", tail[0]) != null)) {
+                if (run < i) try writeColored(writer, color, word[run..i]);
+                try writeColored(writer, param_color, word[i .. i + 2]);
+                consumed = 2;
+            }
+            if (consumed == 0 and (tail.len == 0 or !(tail[0] == '_' or std.ascii.isAlphabetic(tail[0])))) {
+                if (run < i) try writeColored(writer, color, word[run..i]);
+                try writeColored(writer, dollar_color, "$");
+                consumed = 1;
+            }
+            if (consumed > 0) {
+                i += consumed;
+                run = i;
+                continue;
+            }
+        }
         const wildcard = c == '*' or (c == '?' and !(i > 0 and word[i - 1] == '$'));
         const bracket = std.mem.indexOfScalar(u8, "(){}[]", c) != null;
         if (!wildcard and !bracket) {
@@ -220,6 +251,11 @@ fn renderPlain(writer: anytype, word: []const u8, start: usize, end: usize, colo
         run = i;
     }
     if (run < end) try writeColored(writer, color, word[run..end]);
+}
+
+fn isSpecialParam(name: []const u8) bool {
+    if (name.len == 1 and std.mem.indexOfScalar(u8, "@*#?$", name[0]) != null) return true;
+    return isDigits(name);
 }
 
 fn writeColored(writer: anytype, color: []const u8, text: []const u8) !void {

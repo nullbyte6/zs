@@ -33,3 +33,4 @@
 - Add case statements with pattern matching and highlighted patterns
 - Add brace groups, shell functions with local variables, the return builtin and unset -f
 - Add positional parameters $1, ${N}, $@, $*, $#, $0 and $$ with the shift builtin and arithmetic command expansion
+- Update highlighter to color special parameters red and a lone $ orange
