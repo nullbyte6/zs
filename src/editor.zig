@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const completion = @import("complete.zig");
 const highlight = @import("highlight.zig");
+const history = @import("history.zig");
 const unicode = @import("unicode.zig");
 
 const Position = struct {
@@ -12,7 +13,6 @@ const Position = struct {
 pub const Editor = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8),
-    history: std.ArrayList([]u8),
     history_pos: usize = 0,
     draft: ?[]u8 = null,
     cursor: usize = 0,
@@ -24,32 +24,25 @@ pub const Editor = struct {
         return .{
             .allocator = allocator,
             .buffer = .init(allocator),
-            .history = .init(allocator),
             .prompt = prompt,
         };
     }
 
     pub fn deinit(self: *Editor) void {
         self.buffer.deinit();
-        for (self.history.items) |entry| self.allocator.free(entry);
-        self.history.deinit();
         self.clearDraft();
     }
 
     pub fn addHistory(self: *Editor, line: []const u8) !void {
-        if (self.history.getLastOrNull()) |last| {
-            if (std.mem.eql(u8, last, line)) return;
-        }
-        const copy = try self.allocator.dupe(u8, line);
-        errdefer self.allocator.free(copy);
-        try self.history.append(copy);
+        _ = self;
+        try history.add(line);
     }
 
     pub fn readLine(self: *Editor) !?[]const u8 {
         self.buffer.clearRetainingCapacity();
         self.cursor = 0;
         self.cursor_row = 0;
-        self.history_pos = self.history.items.len;
+        self.history_pos = history.entries.items.len;
         self.clearDraft();
 
         const original = posix.tcgetattr(posix.STDIN_FILENO) catch |err| switch (err) {
@@ -177,11 +170,11 @@ pub const Editor = struct {
 
     fn suggestion(self: *const Editor) ?[]const u8 {
         const typed = self.buffer.items;
-        if (typed.len == 0 or self.cursor != typed.len or self.history_pos != self.history.items.len) return null;
-        var i = self.history.items.len;
+        if (typed.len == 0 or self.cursor != typed.len or self.history_pos != history.entries.items.len) return null;
+        var i = history.entries.items.len;
         while (i > 0) {
             i -= 1;
-            const entry = self.history.items[i];
+            const entry = history.entries.items[i];
             if (entry.len > typed.len and std.mem.startsWith(u8, entry, typed) and std.mem.indexOfScalar(u8, entry, '\n') == null) {
                 return entry[typed.len..];
             }
@@ -255,21 +248,21 @@ pub const Editor = struct {
 
     fn historyPrevious(self: *Editor) !void {
         if (self.history_pos == 0) return;
-        if (self.history_pos == self.history.items.len) {
+        if (self.history_pos == history.entries.items.len) {
             self.clearDraft();
             self.draft = try self.allocator.dupe(u8, self.buffer.items);
         }
         self.history_pos -= 1;
-        try self.loadLine(self.history.items[self.history_pos]);
+        try self.loadLine(history.entries.items[self.history_pos]);
     }
 
     fn historyNext(self: *Editor) !void {
-        if (self.history_pos >= self.history.items.len) return;
+        if (self.history_pos >= history.entries.items.len) return;
         self.history_pos += 1;
-        if (self.history_pos == self.history.items.len) {
+        if (self.history_pos == history.entries.items.len) {
             try self.loadLine(self.draft orelse "");
         } else {
-            try self.loadLine(self.history.items[self.history_pos]);
+            try self.loadLine(history.entries.items[self.history_pos]);
         }
     }
 
