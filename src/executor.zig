@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const parser = @import("parser.zig");
 const vars = @import("vars.zig");
+const commands = @import("commands.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -51,8 +52,13 @@ pub const Shell = struct {
         const cmds = pipeline.commands;
         if (cmds.len == 1) {
             const cmd = cmds[0];
-            if (cmd.argv.len == 0) return .{ .status = assign(cmd.assignments) };
-            if (self.builtin(arena, cmd.argv)) |outcome| return outcome;
+            if (cmd.argv.len == 0 or isBuiltin(cmd.argv[0])) {
+                const saved = saveStandardFds();
+                defer restoreStandardFds(saved);
+                if (!applyRedirects(cmd.redirects)) return .{ .status = 1 };
+                if (cmd.argv.len == 0) return .{ .status = assign(cmd.assignments) };
+                return self.builtin(arena, cmd.argv).?;
+            }
         }
 
         const pids = try arena.alloc(posix.pid_t, cmds.len);
@@ -101,7 +107,8 @@ pub const Shell = struct {
             posix.close(fds[0]);
             posix.close(fds[1]);
         }
-        if (cmd.argv.len == 0) posix.exit(0);
+        if (!applyRedirects(cmd.redirects)) posix.exit(1);
+        if (cmd.argv.len == 0) posix.exit(assign(cmd.assignments));
         if (self.builtin(arena, cmd.argv)) |outcome| {
             switch (outcome) {
                 .status => |status| posix.exit(status),
@@ -120,6 +127,67 @@ pub const Shell = struct {
         return null;
     }
 };
+
+fn isBuiltin(name: []const u8) bool {
+    for (commands.builtins) |builtin_name| {
+        if (std.mem.eql(u8, builtin_name, name)) return true;
+    }
+    return false;
+}
+
+fn saveStandardFds() [3]?posix.fd_t {
+    var saved: [3]?posix.fd_t = .{ null, null, null };
+    for (&saved, 0..) |*slot, fd| slot.* = posix.dup(@intCast(fd)) catch null;
+    return saved;
+}
+
+fn restoreStandardFds(saved: [3]?posix.fd_t) void {
+    for (saved, 0..) |maybe, fd| {
+        const copy = maybe orelse continue;
+        posix.dup2(copy, @intCast(fd)) catch {};
+        posix.close(copy);
+    }
+}
+
+fn applyRedirects(redirects: []const parser.Redirect) bool {
+    for (redirects) |redirect| {
+        const fd: posix.fd_t = redirect.fd;
+        if (redirect.kind == .dup) {
+            if (std.mem.eql(u8, redirect.target, "-")) {
+                posix.close(fd);
+                continue;
+            }
+            const source = std.fmt.parseInt(posix.fd_t, redirect.target, 10) catch {
+                printError("{s}: ambiguous redirect", .{redirect.target});
+                return false;
+            };
+            posix.dup2(source, fd) catch {
+                printError("{d}: Bad file descriptor", .{source});
+                return false;
+            };
+            continue;
+        }
+        const flags: posix.O = switch (redirect.kind) {
+            .read => .{ .ACCMODE = .RDONLY },
+            .write => .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+            .append => .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
+            .dup => unreachable,
+        };
+        const opened = posix.open(redirect.target, flags, 0o666) catch |err| {
+            printError("{s}: {s}", .{ redirect.target, describe(err) });
+            return false;
+        };
+        if (opened != fd) {
+            posix.dup2(opened, fd) catch {
+                posix.close(opened);
+                printError("{d}: Bad file descriptor", .{fd});
+                return false;
+            };
+            posix.close(opened);
+        }
+    }
+    return true;
+}
 
 fn assign(assignments: []const vars.Assignment) u8 {
     for (assignments) |assignment| {
@@ -291,6 +359,7 @@ fn describe(err: anyerror) []const u8 {
         error.FileNotFound => "No such file or directory",
         error.NotDir => "Not a directory",
         error.AccessDenied => "Permission denied",
+        error.IsDir => "Is a directory",
         error.NameTooLong => "File name too long",
         error.SymLinkLoop => "Too many levels of symbolic links",
         else => @errorName(err),

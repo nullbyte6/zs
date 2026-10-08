@@ -3,9 +3,18 @@ const posix = std.posix;
 const glob = @import("glob.zig");
 const vars = @import("vars.zig");
 
+pub const RedirectKind = enum { read, write, append, dup };
+
+pub const Redirect = struct {
+    fd: u8,
+    kind: RedirectKind,
+    target: []const u8 = "",
+};
+
 pub const Command = struct {
     argv: []const []const u8,
     assignments: []const vars.Assignment = &.{},
+    redirects: []const Redirect = &.{},
 };
 
 pub const Join = enum { always, and_if, or_if };
@@ -19,6 +28,7 @@ pub const Error = error{
     UnterminatedQuote,
     UnsupportedOperator,
     MissingCommand,
+    MissingTarget,
     BadSubstitution,
     OutOfMemory,
 };
@@ -26,7 +36,8 @@ pub const Error = error{
 pub fn message(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.UnterminatedQuote => "syntax error: unterminated quote",
-        error.UnsupportedOperator => "syntax error: '&', '<' and '>' are not supported yet",
+        error.UnsupportedOperator => "syntax error: unsupported operator",
+        error.MissingTarget => "syntax error: missing redirection target",
         error.MissingCommand => "syntax error: missing command",
         error.BadSubstitution => "syntax error: bad substitution",
         error.OutOfMemory => "out of memory",
@@ -46,6 +57,8 @@ pub const Parser = struct {
     plain: bool = true,
     assign_name: ?[]const u8 = null,
     assignments: std.ArrayList(vars.Assignment),
+    redirects: std.ArrayList(Redirect),
+    pending_redirect: ?Redirect = null,
     words: std.ArrayList([]const u8),
     commands: std.ArrayList(Command),
     pending_join: Join = .always,
@@ -58,6 +71,7 @@ pub const Parser = struct {
             .word = .init(arena),
             .pattern = .init(arena),
             .assignments = .init(arena),
+            .redirects = .init(arena),
             .words = .init(arena),
             .commands = .init(arena),
         };
@@ -116,7 +130,7 @@ pub const Parser = struct {
                     self.pos += 2;
                     return try self.endPipeline(.and_if);
                 },
-                '<', '>' => return error.UnsupportedOperator,
+                '<', '>' => try self.redirect(),
                 '~' => {
                     self.plain = false;
                     if (!self.in_word and tildeEnds(line, self.pos + 1)) {
@@ -132,7 +146,7 @@ pub const Parser = struct {
                     self.pos += 1;
                 },
                 '*', '?', '[' => {
-                    if (self.assign_name != null) {
+                    if (self.assign_name != null or self.pending_redirect != null) {
                         try self.appendLiteral(c);
                     } else {
                         try self.word.append(c);
@@ -144,7 +158,7 @@ pub const Parser = struct {
                     self.pos += 1;
                 },
                 '=' => {
-                    if (self.in_word and self.plain and self.words.items.len == 0 and self.assign_name == null and isName(self.word.items)) {
+                    if (self.in_word and self.plain and self.words.items.len == 0 and self.assign_name == null and self.pending_redirect == null and isName(self.word.items)) {
                         self.assign_name = try self.arena.dupe(u8, self.word.items);
                         self.word.clearRetainingCapacity();
                         self.pattern.clearRetainingCapacity();
@@ -163,7 +177,7 @@ pub const Parser = struct {
         }
 
         try self.flushWord();
-        if (self.words.items.len > 0 or self.assignments.items.len > 0) return try self.endPipeline(.always);
+        if (self.words.items.len > 0 or self.assignments.items.len > 0 or self.redirects.items.len > 0 or self.pending_redirect != null) return try self.endPipeline(.always);
         if (self.commands.items.len > 0 or self.expect_more) return error.MissingCommand;
         return null;
     }
@@ -171,6 +185,16 @@ pub const Parser = struct {
     fn flushWord(self: *Parser) Error!void {
         if (!self.in_word) return;
         self.plain = true;
+        if (self.pending_redirect) |pending| {
+            var done = pending;
+            done.target = try self.word.toOwnedSlice();
+            self.pattern.clearRetainingCapacity();
+            try self.redirects.append(done);
+            self.pending_redirect = null;
+            self.has_glob = false;
+            self.in_word = false;
+            return;
+        }
         if (self.assign_name) |name| {
             try self.assignments.append(.{ .name = name, .value = try self.word.toOwnedSlice() });
             self.pattern.clearRetainingCapacity();
@@ -204,10 +228,12 @@ pub const Parser = struct {
 
     fn endCommand(self: *Parser) Error!void {
         try self.flushWord();
-        if (self.words.items.len == 0 and self.assignments.items.len == 0) return error.MissingCommand;
+        if (self.pending_redirect != null) return error.MissingTarget;
+        if (self.words.items.len == 0 and self.assignments.items.len == 0 and self.redirects.items.len == 0) return error.MissingCommand;
         try self.commands.append(.{
             .argv = try self.words.toOwnedSlice(),
             .assignments = try self.assignments.toOwnedSlice(),
+            .redirects = try self.redirects.toOwnedSlice(),
         });
     }
 
@@ -217,6 +243,36 @@ pub const Parser = struct {
         self.pending_join = following;
         self.expect_more = following != .always;
         return pipeline;
+    }
+
+    fn redirect(self: *Parser) Error!void {
+        const line = self.line;
+        const op = line[self.pos];
+        var fd: u8 = if (op == '<') 0 else 1;
+        if (self.in_word and self.plain and self.assign_name == null and self.pending_redirect == null and isDigits(self.word.items)) {
+            fd = std.fmt.parseInt(u8, self.word.items, 10) catch return error.UnsupportedOperator;
+            self.word.clearRetainingCapacity();
+            self.pattern.clearRetainingCapacity();
+            self.in_word = false;
+        } else {
+            try self.flushWord();
+        }
+        if (self.pending_redirect != null) return error.MissingTarget;
+
+        var kind: RedirectKind = if (op == '<') .read else .write;
+        self.pos += 1;
+        if (op == '>' and self.pos < line.len) {
+            if (line[self.pos] == '>') {
+                kind = .append;
+                self.pos += 1;
+            } else if (line[self.pos] == '&') {
+                kind = .dup;
+                self.pos += 1;
+            }
+        } else if (op == '<' and self.pos < line.len and (line[self.pos] == '<' or line[self.pos] == '>')) {
+            return error.UnsupportedOperator;
+        }
+        self.pending_redirect = .{ .fd = fd, .kind = kind };
     }
 
     fn peek(self: *Parser, expected: u8) bool {
@@ -275,7 +331,7 @@ pub const Parser = struct {
         }
         self.pos = i;
 
-        if (quoted or self.assign_name != null) {
+        if (quoted or self.assign_name != null or self.pending_redirect != null) {
             try self.appendLiteralSlice(value);
             return;
         }
@@ -292,6 +348,14 @@ pub const Parser = struct {
 
 fn isNameChar(c: u8, first: bool) bool {
     return c == '_' or std.ascii.isAlphabetic(c) or (!first and std.ascii.isDigit(c));
+}
+
+fn isDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
 }
 
 pub fn isName(name: []const u8) bool {
