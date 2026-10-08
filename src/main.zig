@@ -29,15 +29,14 @@ pub fn main() !u8 {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        const pipelines = parser.parse(arena.allocator(), input) catch |err| {
-            try stderr.print("zs: {s}\n", .{parser.message(err)});
-            shell.last_status = 2;
-            continue;
-        };
-
-        const exit_code = shell.run(arena.allocator(), pipelines) catch |err| {
-            try stderr.print("zs: {s}\n", .{@errorName(err)});
-            shell.last_status = 1;
+        const exit_code = shell.run(arena.allocator(), input) catch |err| {
+            if (parser.message(err)) |text| {
+                try stderr.print("zs: {s}\n", .{text});
+                shell.last_status = 2;
+            } else {
+                try stderr.print("zs: {s}\n", .{@errorName(err)});
+                shell.last_status = 1;
+            }
             continue;
         };
         if (exit_code) |code| return code;

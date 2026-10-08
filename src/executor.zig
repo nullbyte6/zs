@@ -29,8 +29,9 @@ fn restoreDefaultSignals() void {
 pub const Shell = struct {
     last_status: u8 = 0,
 
-    pub fn run(self: *Shell, arena: std.mem.Allocator, pipelines: []const parser.Pipeline) !?u8 {
-        for (pipelines) |pipeline| {
+    pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8) !?u8 {
+        var p = parser.Parser.init(arena, line);
+        while (try p.next(self.last_status)) |pipeline| {
             switch (try self.runPipeline(arena, pipeline)) {
                 .status => |status| self.last_status = status,
                 .exit => |code| return code,
