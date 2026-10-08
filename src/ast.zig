@@ -173,7 +173,7 @@ const Parser = struct {
         if (std.mem.eql(u8, word, "case")) return self.parseCase();
         if (std.mem.eql(u8, word, "{")) return self.parseGroup();
         if (std.mem.eql(u8, word, "function")) return self.parseFunction(true);
-        if (parser.isName(word) and self.hasEmptyParens(self.pos + word.len)) return self.parseFunction(false);
+        if (parser.isFunctionName(word) and self.hasEmptyParens(self.pos + word.len)) return self.parseFunction(false);
         if (isOneOf(&reserved, word)) return error.Syntax;
         return .{ .simple = try self.scanSpan() };
     }
@@ -333,7 +333,7 @@ const Parser = struct {
             self.skipBlanks();
         }
         const name = self.peekWord();
-        if (!parser.isName(name)) return if (self.eof()) error.Incomplete else error.Syntax;
+        if (!parser.isFunctionName(name)) return if (self.eof()) error.Incomplete else error.Syntax;
         self.pos += name.len;
         self.skipBlanks();
         if (!self.eof() and self.text[self.pos] == '(') {

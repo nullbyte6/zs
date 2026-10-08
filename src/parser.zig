@@ -729,6 +729,14 @@ fn isSpecialName(name: []const u8) bool {
     return isDigits(name);
 }
 
+pub fn isFunctionName(name: []const u8) bool {
+    if (name.len == 0 or !isNameChar(name[0], true)) return false;
+    for (name[1..]) |c| {
+        if (!isNameChar(c, false) and c != '-' and c != '.') return false;
+    }
+    return true;
+}
+
 pub fn isName(name: []const u8) bool {
     if (name.len == 0) return false;
     for (name, 0..) |c, i| {

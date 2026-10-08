@@ -136,8 +136,8 @@ pub fn render(writer: anytype, line: []const u8) !void {
 
 fn definesFunction(line: []const u8, start: usize, end: usize) bool {
     const word = line[start..end];
-    if (std.mem.endsWith(u8, word, "()")) return parser.isName(word[0 .. word.len - 2]);
-    if (!parser.isName(word)) return false;
+    if (std.mem.endsWith(u8, word, "()")) return parser.isFunctionName(word[0 .. word.len - 2]);
+    if (!parser.isFunctionName(word)) return false;
     var i = end;
     while (i < line.len and isSpace(line[i])) i += 1;
     if (i >= line.len or line[i] != '(') return false;
