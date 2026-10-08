@@ -21,3 +21,4 @@
 - Add shell variables with NAME=value assignments, export and unset builtins, and an environment passed to child commands
 - Update cd to track PWD and OLDPWD and support cd -
 - Add input and output redirection with <, >, >>, N> and N>&M
+- Add bright cyan highlighting for operators, redirections, wildcards and symbol arguments
