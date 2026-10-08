@@ -5,8 +5,11 @@ pub const Command = struct {
     argv: []const []const u8,
 };
 
+pub const Join = enum { always, and_if, or_if };
+
 pub const Pipeline = struct {
     commands: []const Command,
+    join: Join = .always,
 };
 
 pub const Error = error{
@@ -37,6 +40,8 @@ pub const Parser = struct {
     in_word: bool = false,
     words: std.ArrayList([]const u8),
     commands: std.ArrayList(Command),
+    pending_join: Join = .always,
+    expect_more: bool = false,
 
     pub fn init(arena: std.mem.Allocator, line: []const u8) Parser {
         return .{
@@ -77,14 +82,23 @@ pub const Parser = struct {
                 },
                 '$' => try self.expandVariable(false),
                 '|' => {
+                    if (self.peek('|')) {
+                        self.pos += 2;
+                        return try self.endPipeline(.or_if);
+                    }
                     try self.endCommand();
                     self.pos += 1;
                 },
                 ';' => {
                     self.pos += 1;
-                    return try self.endPipeline();
+                    return try self.endPipeline(.always);
                 },
-                '&', '<', '>' => return error.UnsupportedOperator,
+                '&' => {
+                    if (!self.peek('&')) return error.UnsupportedOperator;
+                    self.pos += 2;
+                    return try self.endPipeline(.and_if);
+                },
+                '<', '>' => return error.UnsupportedOperator,
                 '~' => {
                     if (!self.in_word and tildeEnds(line, self.pos + 1)) {
                         if (posix.getenv("HOME")) |home| {
@@ -107,8 +121,8 @@ pub const Parser = struct {
         }
 
         try self.flushWord();
-        if (self.words.items.len > 0) return try self.endPipeline();
-        if (self.commands.items.len > 0) return error.MissingCommand;
+        if (self.words.items.len > 0) return try self.endPipeline(.always);
+        if (self.commands.items.len > 0 or self.expect_more) return error.MissingCommand;
         return null;
     }
 
@@ -124,9 +138,16 @@ pub const Parser = struct {
         try self.commands.append(.{ .argv = try self.words.toOwnedSlice() });
     }
 
-    fn endPipeline(self: *Parser) Error!Pipeline {
+    fn endPipeline(self: *Parser, following: Join) Error!Pipeline {
         try self.endCommand();
-        return .{ .commands = try self.commands.toOwnedSlice() };
+        const pipeline = Pipeline{ .commands = try self.commands.toOwnedSlice(), .join = self.pending_join };
+        self.pending_join = following;
+        self.expect_more = following != .always;
+        return pipeline;
+    }
+
+    fn peek(self: *Parser, expected: u8) bool {
+        return self.pos + 1 < self.line.len and self.line[self.pos + 1] == expected;
     }
 
     fn doubleQuoted(self: *Parser) Error!void {

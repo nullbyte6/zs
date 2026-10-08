@@ -32,6 +32,12 @@ pub const Shell = struct {
     pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8) !?u8 {
         var p = parser.Parser.init(arena, line);
         while (try p.next(self.last_status)) |pipeline| {
+            const should_run = switch (pipeline.join) {
+                .always => true,
+                .and_if => self.last_status == 0,
+                .or_if => self.last_status != 0,
+            };
+            if (!should_run) continue;
             switch (try self.runPipeline(arena, pipeline)) {
                 .status => |status| self.last_status = status,
                 .exit => |code| return code,

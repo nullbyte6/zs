@@ -13,3 +13,4 @@
 - Add command line parser for quotes, pipes, semicolons and tilde expansion
 - Add command execution with pipelines, cd and exit builtins, and interrupt handling
 - Add variable expansion for $VAR, ${VAR} and $? with lazily parsed command lists
+- Add && and || operators for conditional command lists
