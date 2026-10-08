@@ -45,7 +45,8 @@ pub fn main() !u8 {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        const exit_code = shell.run(arena.allocator(), input, .{ .context = &editor, .next = nextContinuationLine }) catch |err| {
+        const owned_input = try arena.allocator().dupe(u8, input);
+        const exit_code = shell.run(arena.allocator(), owned_input, .{ .context = &editor, .next = nextContinuationLine }) catch |err| {
             if (parser.message(err)) |text| {
                 try stderr.print("zs: {s}\n", .{text});
                 shell.last_status = 2;

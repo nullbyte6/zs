@@ -60,6 +60,8 @@ pub fn message(err: anyerror) ?[]const u8 {
         error.DivideByZero => "division by zero in arithmetic expression",
         error.MissingCommand => "syntax error: missing command",
         error.BadSubstitution => "syntax error: bad substitution",
+        error.Syntax => "syntax error: unexpected token or keyword",
+        error.UnexpectedEof => "syntax error: unexpected end of input",
         error.OutOfMemory => "out of memory",
         else => null,
     };
@@ -139,6 +141,14 @@ pub const Parser = struct {
                         self.pos += 1;
                     }
                     self.in_word = true;
+                },
+                '#' => {
+                    if (self.in_word) {
+                        try self.appendLiteral('#');
+                        self.pos += 1;
+                    } else {
+                        while (self.pos < line.len and line[self.pos] != '\n') self.pos += 1;
+                    }
                 },
                 '$' => {
                     self.plain = false;

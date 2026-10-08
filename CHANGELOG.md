@@ -26,3 +26,5 @@
 - Add &> and &>> to redirect both stdout and stderr
 - Add command substitution with $(...) and backticks
 - Add arithmetic expansion with $((...))
+- Add if, for, while and until control flow with break, continue and (( )) arithmetic commands
+- Fix command text being corrupted when continuation lines reuse the editor buffer

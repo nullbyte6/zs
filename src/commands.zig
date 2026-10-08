@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const vars = @import("vars.zig");
 
-pub const builtins = [_][]const u8{ "cd", "exit", "export", "unset" };
+pub const builtins = [_][]const u8{ "cd", "exit", "export", "unset", "break", "continue" };
 
 pub fn exists(name: []const u8) bool {
     if (name.len == 0) return false;

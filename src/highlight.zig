@@ -9,11 +9,15 @@ const argument_color = "\x1b[34m";
 const string_color = "\x1b[36m";
 const flag_color = "\x1b[90m";
 const symbol_color = "\x1b[96m";
+const keyword_color = "\x1b[35m";
+
+const keywords = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for" };
 
 pub fn render(writer: anytype, line: []const u8) !void {
     var i: usize = 0;
     var expect_command = true;
     var after_redirect = false;
+    var for_state: u8 = 0;
     while (i < line.len) {
         const c = line[i];
         if (isSpace(c)) {
@@ -43,6 +47,21 @@ pub fn render(writer: anytype, line: []const u8) !void {
             } else if (after_redirect) {
                 try renderWord(writer, word, argument_color);
                 after_redirect = false;
+            } else if (expect_command and isKeyword(word)) {
+                try writeColored(writer, keyword_color, word);
+                if (std.mem.eql(u8, word, "for")) {
+                    expect_command = false;
+                    for_state = 1;
+                }
+            } else if (for_state == 1) {
+                try renderWord(writer, word, argument_color);
+                for_state = 2;
+            } else if (for_state == 2 and std.mem.eql(u8, word, "in")) {
+                try writeColored(writer, keyword_color, word);
+                for_state = 0;
+            } else if (expect_command and std.mem.startsWith(u8, word, "((")) {
+                try writeColored(writer, symbol_color, word);
+                expect_command = false;
             } else if (expect_command and isAssignment(word)) {
                 try renderWord(writer, word, argument_color);
             } else if (!expect_command and isSymbolWord(word)) {
@@ -57,6 +76,13 @@ pub fn render(writer: anytype, line: []const u8) !void {
             i = end;
         }
     }
+}
+
+fn isKeyword(word: []const u8) bool {
+    for (keywords) |keyword| {
+        if (std.mem.eql(u8, keyword, word)) return true;
+    }
+    return false;
 }
 
 fn isDigits(word: []const u8) bool {

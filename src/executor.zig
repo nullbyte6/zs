@@ -3,11 +3,25 @@ const posix = std.posix;
 const parser = @import("parser.zig");
 const vars = @import("vars.zig");
 const commands = @import("commands.zig");
+const ast = @import("ast.zig");
+const arith = @import("arith.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
     exit: u8,
+    loop_break: u8,
+    loop_continue: u8,
 };
+
+pub const Flow = union(enum) {
+    normal,
+    exit: u8,
+    break_loop: u8,
+    continue_loop: u8,
+    interrupted,
+};
+
+var sigint_seen = false;
 
 pub fn ignoreInteractiveSignals() void {
     const ignore = posix.Sigaction{
@@ -33,6 +47,129 @@ pub const Shell = struct {
     substitution_status: u8 = 0,
 
     pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!?u8 {
+        const flow = try self.runText(arena, line, lines);
+        return switch (flow) {
+            .exit => |code| code,
+            else => null,
+        };
+    }
+
+    fn runText(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!Flow {
+        var text = line;
+        const list = while (true) {
+            const parsed = ast.parse(arena, text) catch |err| switch (err) {
+                error.Incomplete => {
+                    const source = lines orelse return error.UnexpectedEof;
+                    const more = source.next(source.context, arena) orelse return error.UnexpectedEof;
+                    text = try std.fmt.allocPrint(arena, "{s}\n{s}", .{ text, more });
+                    continue;
+                },
+                else => |other| return other,
+            };
+            break parsed;
+        };
+        if (list.len == 0) return .normal;
+        if (!ast.hasCompound(list)) return self.execLine(arena, text, lines);
+        return self.execList(arena, list, lines);
+    }
+
+    fn execList(self: *Shell, arena: std.mem.Allocator, list: ast.List, lines: ?parser.LineSource) anyerror!Flow {
+        for (list) |item| {
+            const should_run = switch (item.join) {
+                .always => true,
+                .and_if => self.last_status == 0,
+                .or_if => self.last_status != 0,
+            };
+            if (!should_run) continue;
+            const flow = try self.execNode(arena, item.node, lines);
+            if (flow != .normal) return flow;
+        }
+        return .normal;
+    }
+
+    fn execNode(self: *Shell, arena: std.mem.Allocator, node: ast.Node, lines: ?parser.LineSource) anyerror!Flow {
+        switch (node) {
+            .simple => |text| {
+                var leaf = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                defer leaf.deinit();
+                return self.execLine(leaf.allocator(), text, lines);
+            },
+            .arith => |expression| {
+                const value = arith.eval(expression) catch |err| {
+                    printError("{s}", .{if (err == error.DivideByZero) "division by zero in arithmetic expression" else "syntax error in arithmetic expression"});
+                    self.last_status = 1;
+                    return .normal;
+                };
+                self.last_status = if (value != 0) 0 else 1;
+                return .normal;
+            },
+            .if_clause => |clause| {
+                for (clause.branches) |branch| {
+                    const cond_flow = try self.execList(arena, branch.cond, lines);
+                    if (cond_flow != .normal) return cond_flow;
+                    if (self.last_status == 0) return self.execList(arena, branch.body, lines);
+                }
+                if (clause.else_body) |body| return self.execList(arena, body, lines);
+                self.last_status = 0;
+                return .normal;
+            },
+            .loop => |loop| {
+                var status: u8 = 0;
+                while (true) {
+                    const cond_flow = try self.execList(arena, loop.cond, lines);
+                    if (cond_flow != .normal) return cond_flow;
+                    if ((self.last_status == 0) == loop.until) break;
+                    const body_flow = try self.execList(arena, loop.body, lines);
+                    status = self.last_status;
+                    switch (body_flow) {
+                        .normal => {},
+                        .break_loop => |levels| {
+                            if (levels > 1) return .{ .break_loop = levels - 1 };
+                            break;
+                        },
+                        .continue_loop => |levels| {
+                            if (levels > 1) return .{ .continue_loop = levels - 1 };
+                        },
+                        else => return body_flow,
+                    }
+                }
+                self.last_status = status;
+                return .normal;
+            },
+            .for_clause => |clause| {
+                const words = try self.expandWords(arena, clause.words, lines);
+                var status: u8 = 0;
+                for (words) |word| {
+                    vars.set(clause.name, word) catch return error.OutOfMemory;
+                    const body_flow = try self.execList(arena, clause.body, lines);
+                    status = self.last_status;
+                    switch (body_flow) {
+                        .normal => {},
+                        .break_loop => |levels| {
+                            if (levels > 1) return .{ .break_loop = levels - 1 };
+                            break;
+                        },
+                        .continue_loop => |levels| {
+                            if (levels > 1) return .{ .continue_loop = levels - 1 };
+                        },
+                        else => return body_flow,
+                    }
+                }
+                self.last_status = status;
+                return .normal;
+            },
+        }
+    }
+
+    fn expandWords(self: *Shell, arena: std.mem.Allocator, text: []const u8, lines: ?parser.LineSource) anyerror![]const []const u8 {
+        var p = parser.Parser.init(arena, text);
+        p.lines = lines;
+        p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
+        const pipeline = (try p.next(self.last_status)) orelse return &.{};
+        return pipeline.commands[0].argv;
+    }
+
+    fn execLine(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!Flow {
         var p = parser.Parser.init(arena, line);
         p.lines = lines;
         p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
@@ -45,10 +182,16 @@ pub const Shell = struct {
             if (!should_run) continue;
             switch (try self.runPipeline(arena, pipeline)) {
                 .status => |status| self.last_status = status,
-                .exit => |code| return code,
+                .exit => |code| return .{ .exit = code },
+                .loop_break => |levels| return .{ .break_loop = levels },
+                .loop_continue => |levels| return .{ .continue_loop = levels },
+            }
+            if (sigint_seen) {
+                sigint_seen = false;
+                return .interrupted;
             }
         }
-        return null;
+        return .normal;
     }
 
     fn runPipeline(self: *Shell, arena: std.mem.Allocator, pipeline: parser.Pipeline) !Outcome {
@@ -116,6 +259,7 @@ pub const Shell = struct {
             switch (outcome) {
                 .status => |status| posix.exit(status),
                 .exit => |code| posix.exit(code),
+                else => posix.exit(0),
             }
         }
         execute(arena, cmd);
@@ -125,6 +269,8 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "break")) return loopControl(argv[1..], true);
+        if (std.mem.eql(u8, name, "continue")) return loopControl(argv[1..], false);
         if (std.mem.eql(u8, name, "export")) return .{ .status = exportVariables(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "unset")) return .{ .status = unsetVariables(argv[1..]) };
         return null;
@@ -242,6 +388,18 @@ fn applyRedirects(redirects: []const parser.Redirect) bool {
         }
     }
     return true;
+}
+
+fn loopControl(args: []const []const u8, is_break: bool) Outcome {
+    var levels: u8 = 1;
+    if (args.len > 0) {
+        levels = std.fmt.parseInt(u8, args[0], 10) catch 0;
+        if (levels == 0) {
+            printError("{s}: {s}: loop count out of range", .{ if (is_break) "break" else "continue", args[0] });
+            return .{ .status = 1 };
+        }
+    }
+    return if (is_break) .{ .loop_break = levels } else .{ .loop_continue = levels };
 }
 
 fn assign(assignments: []const vars.Assignment) u8 {
@@ -403,7 +561,10 @@ fn reap(pid: posix.pid_t, interrupted: *bool) u8 {
     if (posix.W.IFEXITED(status)) return posix.W.EXITSTATUS(status);
     if (posix.W.IFSIGNALED(status)) {
         const sig = posix.W.TERMSIG(status);
-        if (sig == posix.SIG.INT) interrupted.* = true;
+        if (sig == posix.SIG.INT) {
+            interrupted.* = true;
+            sigint_seen = true;
+        }
         return @intCast(128 + sig);
     }
     return 1;
