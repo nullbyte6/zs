@@ -28,3 +28,4 @@
 - Add arithmetic expansion with $((...))
 - Add if, for, while and until control flow with break, continue and (( )) arithmetic commands
 - Fix command text being corrupted when continuation lines reuse the editor buffer
+- Update highlighter to color reserved words purple and brackets dark gray

@@ -9,9 +9,9 @@ const argument_color = "\x1b[34m";
 const string_color = "\x1b[36m";
 const flag_color = "\x1b[90m";
 const symbol_color = "\x1b[96m";
-const keyword_color = "\x1b[35m";
+const keyword_color = "\x1b[38;5;135m";
 
-const keywords = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for" };
+const keywords = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac", "function", "select" };
 
 pub fn render(writer: anytype, line: []const u8) !void {
     var i: usize = 0;
@@ -49,7 +49,7 @@ pub fn render(writer: anytype, line: []const u8) !void {
                 after_redirect = false;
             } else if (expect_command and isKeyword(word)) {
                 try writeColored(writer, keyword_color, word);
-                if (std.mem.eql(u8, word, "for")) {
+                if (std.mem.eql(u8, word, "for") or std.mem.eql(u8, word, "case") or std.mem.eql(u8, word, "select")) {
                     expect_command = false;
                     for_state = 1;
                 }
@@ -60,7 +60,7 @@ pub fn render(writer: anytype, line: []const u8) !void {
                 try writeColored(writer, keyword_color, word);
                 for_state = 0;
             } else if (expect_command and std.mem.startsWith(u8, word, "((")) {
-                try writeColored(writer, symbol_color, word);
+                try renderWord(writer, word, argument_color);
                 expect_command = false;
             } else if (expect_command and isAssignment(word)) {
                 try renderWord(writer, word, argument_color);
@@ -160,12 +160,13 @@ fn renderPlain(writer: anytype, word: []const u8, start: usize, end: usize, colo
             continue;
         }
         const wildcard = c == '*' or (c == '?' and !(i > 0 and word[i - 1] == '$'));
-        if (!wildcard) {
+        const bracket = std.mem.indexOfScalar(u8, "(){}[]", c) != null;
+        if (!wildcard and !bracket) {
             i += 1;
             continue;
         }
         if (run < i) try writeColored(writer, color, word[run..i]);
-        try writeColored(writer, symbol_color, word[i .. i + 1]);
+        try writeColored(writer, if (bracket) flag_color else symbol_color, word[i .. i + 1]);
         i += 1;
         run = i;
     }
