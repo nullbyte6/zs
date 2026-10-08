@@ -1,4 +1,5 @@
 const std = @import("std");
+const Editor = @import("editor.zig").Editor;
 
 const prompt = " >> ";
 
@@ -7,25 +8,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stdin = std.io.getStdIn().reader();
     const stdout = std.io.getStdOut().writer();
 
-    var line: std.ArrayList(u8) = .init(allocator);
-    defer line.deinit();
+    var editor = Editor.init(allocator, prompt);
+    defer editor.deinit();
 
     while (true) {
-        try stdout.writeAll(prompt);
+        const line = try editor.readLine() orelse break;
 
-        line.clearRetainingCapacity();
-        stdin.streamUntilDelimiter(line.writer(), '\n', null) catch |err| switch (err) {
-            error.EndOfStream => {
-                try stdout.writeAll("\n");
-                break;
-            },
-            else => return err,
-        };
-
-        const input = std.mem.trim(u8, line.items, " \t\r");
+        const input = std.mem.trim(u8, line, " \t\r");
         if (input.len == 0) continue;
 
         if (std.mem.eql(u8, input, "exit")) break;

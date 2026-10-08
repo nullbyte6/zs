@@ -4,3 +4,4 @@
 
 - Fix remove zig init boilerplate
 - Add prompt loop with exit builtin
+- Add raw mode line editor with cursor movement and editing keys
