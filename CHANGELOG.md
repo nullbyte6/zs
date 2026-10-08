@@ -41,3 +41,4 @@
 - Add install.sh to build zs and install it to /usr/local/bin
 - Add configurable prompt with the zsprompt command, bash-style escapes, git branch, time and command substitution
 - Add ~/.zsrc loading on interactive start with red errors and yellow warnings
+- Add source and . builtins to run a file, reloading ~/.zsrc when called without arguments

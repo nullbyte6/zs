@@ -9,6 +9,7 @@ const glob = @import("glob.zig");
 const functions = @import("functions.zig");
 const prompts = @import("prompt.zig");
 const diag = @import("diag.zig");
+const rc = @import("rc.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -54,6 +55,7 @@ pub const Shell = struct {
     last_status: u8 = 0,
     substitution_status: u8 = 0,
     call_depth: usize = 0,
+    source_depth: usize = 0,
 
     pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!?u8 {
         const flow = try self.runText(arena, line, lines);
@@ -452,6 +454,38 @@ pub const Shell = struct {
         };
     }
 
+    fn sourceFile(self: *Shell, args: []const []const u8) Outcome {
+        if (args.len > 1) {
+            printError("source: too many arguments", .{});
+            return .{ .status = 2 };
+        }
+        if (self.source_depth >= max_call_depth) {
+            printError("source: maximum nesting level exceeded ({d})", .{max_call_depth});
+            return .{ .status = 1 };
+        }
+        var default_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path: []const u8 = undefined;
+        var label: []const u8 = "~/.zsrc";
+        if (args.len == 1) {
+            path = args[0];
+            label = args[0];
+        } else {
+            const home = vars.get("HOME") orelse {
+                printError("source: HOME is not set", .{});
+                return .{ .status = 1 };
+            };
+            path = std.fmt.bufPrint(&default_buf, "{s}/.zsrc", .{home}) catch return .{ .status = 1 };
+        }
+        self.source_depth += 1;
+        defer self.source_depth -= 1;
+        const result = rc.runFile(std.heap.page_allocator, self, path, label) catch |err| {
+            printError("source: {s}: {s}", .{ label, describe(err) });
+            return .{ .status = 1 };
+        };
+        if (result) |code| return .{ .exit = code };
+        return .{ .status = self.last_status };
+    }
+
     fn returnFromFunction(self: *Shell, args: []const []const u8) Outcome {
         if (self.call_depth == 0) {
             printError("return: can only return from a function", .{});
@@ -469,6 +503,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "shift")) return .{ .status = shiftParameters(argv[1..]) };
         if (std.mem.eql(u8, name, "local")) return .{ .status = localVariables(argv[1..]) };

@@ -30,10 +30,16 @@ pub fn load(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
     const path = std.fmt.allocPrint(allocator, "{s}/.zsrc", .{home}) catch return null;
     defer allocator.free(path);
 
-    const text = std.fs.cwd().readFileAlloc(allocator, path, 1 << 20) catch |err| {
+    const result = runFile(allocator, shell, path, "~/.zsrc") catch |err| {
         if (err != error.FileNotFound) diag.warning("~/.zsrc: cannot read: {s}", .{@errorName(err)});
         return null;
     };
+    shell.last_status = 0;
+    return result;
+}
+
+pub fn runFile(allocator: std.mem.Allocator, shell: *executor.Shell, path: []const u8, label: []const u8) !?u8 {
+    const text = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 20);
     defer allocator.free(text);
 
     var source = Source{ .text = text };
@@ -46,13 +52,12 @@ pub fn load(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
         defer arena.deinit();
         const owned = arena.allocator().dupe(u8, input) catch continue;
         const exit_code = shell.run(arena.allocator(), owned, .{ .context = &source, .next = nextLine }) catch |err| {
-            diag.failure("~/.zsrc:{d}: {s}", .{ first_line, parser.message(err) orelse @errorName(err) });
+            diag.failure("{s}:{d}: {s}", .{ label, first_line, parser.message(err) orelse @errorName(err) });
             shell.last_status = 2;
             continue;
         };
         if (exit_code) |code| return code;
-        if (shell.last_status == 127) diag.warning("~/.zsrc:{d}: command not found", .{first_line});
+        if (shell.last_status == 127) diag.warning("{s}:{d}: command not found", .{ label, first_line });
     }
-    shell.last_status = 0;
     return null;
 }
