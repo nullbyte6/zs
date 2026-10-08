@@ -34,3 +34,4 @@
 - Add brace groups, shell functions with local variables, the return builtin and unset -f
 - Add positional parameters $1, ${N}, $@, $*, $#, $0 and $$ with the shift builtin and arithmetic command expansion
 - Update highlighter to color special parameters red and a lone $ orange
+- Add subshells with ( ... ) and the ${var:-w}, ${var:=w}, ${var:+w}, ${var:?} and ${#var} expansions

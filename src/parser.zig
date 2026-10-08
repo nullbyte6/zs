@@ -49,6 +49,7 @@ pub const Error = error{
     BadSubstitution,
     BadArithmetic,
     DivideByZero,
+    ParameterNull,
     OutOfMemory,
 };
 
@@ -60,6 +61,7 @@ pub fn message(err: anyerror) ?[]const u8 {
         error.SubstitutionFailed => "command substitution failed",
         error.BadArithmetic => "syntax error in arithmetic expression",
         error.DivideByZero => "division by zero in arithmetic expression",
+        error.ParameterNull => "parameter null or not set",
         error.MissingCommand => "syntax error: missing command",
         error.BadSubstitution => "syntax error: bad substitution",
         error.Syntax => "syntax error: unexpected token or keyword",
@@ -489,16 +491,95 @@ pub const Parser = struct {
             return .{ .value = try self.special(text[i .. i + 1]), .end = i + 1 };
         }
         if (i < text.len and text[i] == '{') {
-            const end = std.mem.indexOfScalarPos(u8, text, i + 1, '}') orelse return error.BadSubstitution;
-            const name = text[i + 1 .. end];
-            if (isSpecialName(name)) return .{ .value = try self.special(name), .end = end + 1 };
-            if (!isName(name)) return error.BadSubstitution;
-            return .{ .value = vars.get(name) orelse "", .end = end + 1 };
+            const end = findBraceEnd(text, i) orelse return error.BadSubstitution;
+            return .{ .value = try self.braced(text[i + 1 .. end]), .end = end + 1 };
         }
         var end = i;
         while (end < text.len and isNameChar(text[end], end == i)) end += 1;
         if (end == i) return null;
         return .{ .value = vars.get(text[i..end]) orelse "", .end = end };
+    }
+
+    fn lookup(self: *Parser, name: []const u8) Error!?[]const u8 {
+        if (isDigits(name)) {
+            const index = std.fmt.parseInt(usize, name, 10) catch return null;
+            if (index > vars.params().len) return null;
+            return try self.special(name);
+        }
+        if (isSpecialName(name)) return try self.special(name);
+        return vars.get(name);
+    }
+
+    fn braced(self: *Parser, content: []const u8) Error![]const u8 {
+        if (content.len == 0) return error.BadSubstitution;
+        if (content[0] == '#' and content.len > 1) {
+            const target = content[1..];
+            if (std.mem.eql(u8, target, "@") or std.mem.eql(u8, target, "*")) {
+                return std.fmt.allocPrint(self.arena, "{d}", .{vars.params().len});
+            }
+            if (!isName(target) and !isDigits(target)) return error.BadSubstitution;
+            const value = (try self.lookup(target)) orelse "";
+            const length = std.unicode.utf8CountCodepoints(value) catch value.len;
+            return std.fmt.allocPrint(self.arena, "{d}", .{length});
+        }
+        var name_end: usize = 0;
+        if (std.ascii.isDigit(content[0])) {
+            while (name_end < content.len and std.ascii.isDigit(content[name_end])) name_end += 1;
+        } else if (std.mem.indexOfScalar(u8, "?#$@*", content[0]) != null) {
+            name_end = 1;
+        } else {
+            while (name_end < content.len and isNameChar(content[name_end], name_end == 0)) name_end += 1;
+        }
+        if (name_end == 0) return error.BadSubstitution;
+        const name = content[0..name_end];
+        const rest = content[name_end..];
+        const current = try self.lookup(name);
+        if (rest.len == 0) return current orelse "";
+
+        const colon = rest[0] == ':';
+        const op_index: usize = if (colon) 1 else 0;
+        if (op_index >= rest.len or std.mem.indexOfScalar(u8, "-=+?", rest[op_index]) == null) return error.BadSubstitution;
+        const operand = rest[op_index + 1 ..];
+        const missing = current == null or (colon and current.?.len == 0);
+        switch (rest[op_index]) {
+            '-' => return if (missing) try self.expandOperand(operand) else current.?,
+            '+' => return if (missing) "" else try self.expandOperand(operand),
+            '=' => {
+                if (!missing) return current.?;
+                if (!isName(name)) return error.BadSubstitution;
+                const value = try self.expandOperand(operand);
+                vars.set(name, value) catch return error.OutOfMemory;
+                return value;
+            },
+            else => {
+                if (missing) return error.ParameterNull;
+                return current.?;
+            },
+        }
+    }
+
+    fn expandOperand(self: *Parser, operand: []const u8) Error![]const u8 {
+        var out = std.ArrayList(u8).init(self.arena);
+        var i: usize = 0;
+        while (i < operand.len) {
+            if (operand[i] == '\'') {
+                const close = std.mem.indexOfScalarPos(u8, operand, i + 1, '\'') orelse return error.UnterminatedQuote;
+                try out.appendSlice(operand[i + 1 .. close]);
+                i = close + 1;
+            } else if (operand[i] == '"') {
+                var close = i + 1;
+                while (close < operand.len and operand[close] != '"') close += if (operand[close] == '\\') 2 else 1;
+                if (close >= operand.len) return error.UnterminatedQuote;
+                try out.appendSlice(try self.expandBody(operand[i + 1 .. close]));
+                i = close + 1;
+            } else {
+                var end = i;
+                while (end < operand.len and operand[end] != '\'' and operand[end] != '"') end += 1;
+                try out.appendSlice(try self.expandBody(operand[i..end]));
+                i = end;
+            }
+        }
+        return out.items;
     }
 
     fn special(self: *Parser, name: []const u8) Error![]const u8 {
@@ -574,6 +655,28 @@ pub fn findParenEnd(text: []const u8, open: usize) ?usize {
         switch (text[i]) {
             '(' => depth += 1,
             ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '\\' => i += 1,
+            '\'' => i = std.mem.indexOfScalarPos(u8, text, i + 1, '\'') orelse return null,
+            '"' => {
+                i += 1;
+                while (i < text.len and text[i] != '"') i += if (text[i] == '\\') 2 else 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn findBraceEnd(text: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '{' => depth += 1,
+            '}' => {
                 depth -= 1;
                 if (depth == 0) return i;
             },

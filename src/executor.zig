@@ -160,6 +160,7 @@ pub const Shell = struct {
                 return .normal;
             },
             .group => |body| return self.execList(arena, body, lines),
+            .subshell => |body| return self.execSubshell(arena, body, lines),
             .function => |definition| {
                 functions.define(definition.name, definition.body) catch return error.OutOfMemory;
                 self.last_status = 0;
@@ -201,6 +202,27 @@ pub const Shell = struct {
                 return .normal;
             },
         }
+    }
+
+    fn execSubshell(self: *Shell, arena: std.mem.Allocator, body: ast.List, lines: ?parser.LineSource) anyerror!Flow {
+        const pid = try posix.fork();
+        if (pid == 0) {
+            restoreDefaultSignals();
+            const flow = self.execList(arena, body, lines) catch posix.exit(1);
+            posix.exit(switch (flow) {
+                .exit => |code| code,
+                .return_fn => |code| code,
+                else => self.last_status,
+            });
+        }
+        var interrupted = false;
+        self.last_status = reap(pid, &interrupted);
+        if (interrupted) {
+            std.io.getStdOut().writeAll("\n") catch {};
+            sigint_seen = false;
+            return .interrupted;
+        }
+        return .normal;
     }
 
     fn redirectCommand(self: *Shell, arena: std.mem.Allocator, text: []const u8, lines: ?parser.LineSource) anyerror!parser.Command {

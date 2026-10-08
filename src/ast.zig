@@ -62,6 +62,7 @@ pub const Node = union(enum) {
     for_clause: ForClause,
     case_clause: CaseClause,
     group: List,
+    subshell: List,
     function: FunctionDef,
 };
 
@@ -129,6 +130,10 @@ const Parser = struct {
                 if (need_command or terminators.len > 0) return error.Incomplete;
                 break;
             }
+            if (self.text[self.pos] == ')') {
+                if (need_command or !isOneOf(terminators, ")")) return error.Syntax;
+                break;
+            }
             if (std.mem.startsWith(u8, self.text[self.pos..], ";;")) {
                 if (need_command or !isOneOf(terminators, ";;")) return error.Syntax;
                 break;
@@ -151,7 +156,7 @@ const Parser = struct {
                 self.pos += 2;
                 join = .or_if;
                 need_command = true;
-            } else if (!self.eof() and self.text[self.pos] != ';' and self.text[self.pos] != '\n' and self.text[self.pos] != '#') {
+            } else if (!self.eof() and self.text[self.pos] != ';' and self.text[self.pos] != '\n' and self.text[self.pos] != '#' and !(self.text[self.pos] == ')' and isOneOf(terminators, ")"))) {
                 return error.Syntax;
             }
         }
@@ -160,6 +165,7 @@ const Parser = struct {
 
     fn parseCommand(self: *Parser) Error!Node {
         if (std.mem.startsWith(u8, self.text[self.pos..], "((")) return self.parseArith();
+        if (self.text[self.pos] == '(') return self.parseSubshell();
         const word = self.peekWord();
         if (std.mem.eql(u8, word, "if")) return self.parseIf();
         if (std.mem.eql(u8, word, "while") or std.mem.eql(u8, word, "until")) return self.parseLoop();
@@ -296,6 +302,14 @@ const Parser = struct {
         return .{ .for_clause = .{ .name = name, .words = words, .body = body } };
     }
 
+    fn parseSubshell(self: *Parser) Error!Node {
+        self.pos += 1;
+        const body = try self.parseList(&.{")"});
+        if (body.len == 0) return error.Syntax;
+        self.pos += 1;
+        return .{ .subshell = body };
+    }
+
     fn parseGroup(self: *Parser) Error!Node {
         self.pos += 1;
         const body = try self.parseList(&.{"}"});
@@ -404,7 +418,7 @@ const Parser = struct {
         var i = start;
         scan: while (i < text.len) {
             switch (text[i]) {
-                ';', '\n' => break :scan,
+                ';', '\n', ')' => break :scan,
                 '&' => {
                     if (i + 1 < text.len and text[i + 1] == '&') break :scan;
                     i += 1;
@@ -420,13 +434,7 @@ const Parser = struct {
                 '\'' => i = (std.mem.indexOfScalarPos(u8, text, i + 1, '\'') orelse return error.Incomplete) + 1,
                 '`' => i = (std.mem.indexOfScalarPos(u8, text, i + 1, '`') orelse return error.Incomplete) + 1,
                 '"' => i = try skipDouble(text, i),
-                '$' => {
-                    if (i + 1 < text.len and text[i + 1] == '(') {
-                        i = (parser.findParenEnd(text, i + 1) orelse return error.Incomplete) + 1;
-                    } else {
-                        i += 1;
-                    }
-                },
+                '$' => i = try skipDollar(text, i),
                 '#' => {
                     if (i == start or text[i - 1] == ' ' or text[i - 1] == '\t') break :scan;
                     i += 1;
@@ -456,13 +464,7 @@ fn skipWord(text: []const u8, start: usize) Error!usize {
             '\'' => j = (std.mem.indexOfScalarPos(u8, text, j + 1, '\'') orelse return error.Incomplete) + 1,
             '"' => j = try skipDouble(text, j),
             '\\' => j = @min(j + 2, text.len),
-            '$' => {
-                if (j + 1 < text.len and text[j + 1] == '(') {
-                    j = (parser.findParenEnd(text, j + 1) orelse return error.Incomplete) + 1;
-                } else {
-                    j += 1;
-                }
-            },
+            '$' => j = try skipDollar(text, j),
             else => j += 1,
         }
     }
@@ -470,11 +472,20 @@ fn skipWord(text: []const u8, start: usize) Error!usize {
 }
 
 fn compoundStartsAt(text: []const u8, index: usize) bool {
-    if (std.mem.startsWith(u8, text[index..], "((")) return true;
+    if (index < text.len and text[index] == '(') return true;
     var end = index;
     while (end < text.len and std.mem.indexOfScalar(u8, " \t\n;&|<>()'\"`$\\#", text[end]) == null) end += 1;
     const word = text[index..end];
     return std.mem.eql(u8, word, "if") or std.mem.eql(u8, word, "while") or std.mem.eql(u8, word, "until") or std.mem.eql(u8, word, "for") or std.mem.eql(u8, word, "case") or std.mem.eql(u8, word, "{");
+}
+
+fn skipDollar(text: []const u8, index: usize) Error!usize {
+    if (index + 1 >= text.len) return index + 1;
+    switch (text[index + 1]) {
+        '(' => return (parser.findParenEnd(text, index + 1) orelse return error.Incomplete) + 1,
+        '{' => return (parser.findBraceEnd(text, index + 1) orelse return error.Incomplete) + 1,
+        else => return index + 1,
+    }
 }
 
 fn skipDouble(text: []const u8, start: usize) Error!usize {
@@ -484,13 +495,7 @@ fn skipDouble(text: []const u8, start: usize) Error!usize {
             '\\' => i += 2,
             '"' => return i + 1,
             '`' => i = (std.mem.indexOfScalarPos(u8, text, i + 1, '`') orelse return error.Incomplete) + 1,
-            '$' => {
-                if (i + 1 < text.len and text[i + 1] == '(') {
-                    i = (parser.findParenEnd(text, i + 1) orelse return error.Incomplete) + 1;
-                } else {
-                    i += 1;
-                }
-            },
+            '$' => i = try skipDollar(text, i),
             else => i += 1,
         }
     }
