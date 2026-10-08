@@ -35,8 +35,8 @@ pub const Editor = struct {
         raw.lflag.IEXTEN = false;
         raw.cc[@intFromEnum(posix.V.MIN)] = 1;
         raw.cc[@intFromEnum(posix.V.TIME)] = 0;
-        try posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, raw);
-        defer posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, original) catch {};
+        try posix.tcsetattr(posix.STDIN_FILENO, .NOW, raw);
+        defer posix.tcsetattr(posix.STDIN_FILENO, .NOW, original) catch {};
 
         return self.readRaw();
     }
