@@ -2,6 +2,7 @@ const std = @import("std");
 const Editor = @import("editor.zig").Editor;
 const executor = @import("executor.zig");
 const functions = @import("functions.zig");
+const history = @import("history.zig");
 const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
 const rc = @import("rc.zig");
@@ -38,6 +39,8 @@ pub fn main() !u8 {
     defer functions.deinit();
     prompt.init(allocator);
     defer prompt.deinit();
+    history.init(allocator);
+    defer history.deinit();
 
     const stderr = std.io.getStdErr().writer();
     const stdout = std.io.getStdOut().writer();
@@ -106,6 +109,7 @@ pub fn main() !u8 {
 
     if (interactive) {
         if (rc.load(allocator, &shell)) |code| return code;
+        history.load();
     }
 
     while (true) {

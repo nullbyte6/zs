@@ -10,6 +10,7 @@ const functions = @import("functions.zig");
 const prompts = @import("prompt.zig");
 const diag = @import("diag.zig");
 const rc = @import("rc.zig");
+const history = @import("history.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -582,6 +583,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
         if (std.mem.eql(u8, name, ":")) return .{ .status = 0 };
         if (std.mem.eql(u8, name, "exec")) return .{ .status = replaceProcess(arena, argv[1..]) };
+        if (std.mem.eql(u8, name, "history")) return .{ .status = historyCommand(argv[1..]) };
         if (std.mem.eql(u8, name, "set")) return .{ .status = self.setOptions(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
@@ -984,6 +986,22 @@ fn exitShell(last_status: u8, args: []const []const u8) Outcome {
         return .{ .exit = 2 };
     };
     return .{ .exit = @intCast(@mod(code, 256)) };
+}
+
+fn historyCommand(args: []const []const u8) u8 {
+    if (args.len == 0) {
+        const stdout = std.io.getStdOut().writer();
+        for (history.entries.items, 1..) |entry, number| {
+            stdout.print("{d:>5}  {s}\n", .{ number, entry }) catch return 1;
+        }
+        return 0;
+    }
+    if (args.len == 1 and std.mem.eql(u8, args[0], "-c")) {
+        history.clear();
+        return 0;
+    }
+    printError("history: usage: history [-c]", .{});
+    return 2;
 }
 
 fn replaceProcess(arena: std.mem.Allocator, args: []const []const u8) u8 {
