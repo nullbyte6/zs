@@ -4,6 +4,7 @@ const executor = @import("executor.zig");
 const functions = @import("functions.zig");
 const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
+const rc = @import("rc.zig");
 const vars = @import("vars.zig");
 
 fn nextContinuationLine(context: *anyopaque, arena: std.mem.Allocator) ?[]const u8 {
@@ -41,6 +42,10 @@ pub fn main() !u8 {
     var shell = executor.Shell{};
     var editor = Editor.init(allocator, "");
     defer editor.deinit();
+
+    if (interactive) {
+        if (rc.load(allocator, &shell)) |code| return code;
+    }
 
     while (true) {
         var prompt_arena = std.heap.ArenaAllocator.init(allocator);
