@@ -37,7 +37,7 @@
   executables that really exist are colored as commands, and anything else
   turns red.
 - Inline suggestions from your history, shown as dim text after the cursor.
-- Tab completion for commands, builtins, functions and files.
+- Command completion shown as dim text while you type and cycled with `Tab`: commands from `PATH`, subcommands (`git sta` becomes `git status`), options read from the installed man pages (`--mes` becomes `--message=`), value hints such as `"msg"` after `-m`, builtins, functions and files. A match anywhere in the name is offered after the prefix matches.
 - Persistent history in `~/.zs_history`.
 - A customizable prompt with colors, git branch, time and exit status, changed
   at runtime with `zsprompt`. See [prompt](#prompt).
@@ -113,7 +113,9 @@ zs -c 'for f in "$@"; do echo "$f"; done' zs a b c
 | `End`, `Ctrl-E`              | End of line. Also accepts an inline suggestion  |
 | `→`, `Ctrl-F` at end of line | Accept the inline suggestion                    |
 | `↑` `↓`, `Ctrl-P` `Ctrl-N`   | Previous and next history entry                 |
-| `Tab`                        | Complete, insert the common prefix or list matches |
+| `Tab`, `Shift-Tab`           | Cycle forward and back through completions      |
+| `Alt-←` `Alt-→`              | Move by word. `Alt-→` at the end accepts one word of the suggestion |
+| `Alt-Backspace`, `Alt-D`     | Delete the previous or next word                |
 | `Backspace`, `Delete`        | Delete before and after the cursor              |
 | `Ctrl-W`                     | Delete the previous word                        |
 | `Ctrl-U`                     | Delete to the start of the line                 |

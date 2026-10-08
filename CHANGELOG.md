@@ -57,3 +57,4 @@
 - Update README with features, installation, shell language, builtins, prompt customization and internals
 - Add Alt+Backspace, Alt+Left/Right and Alt+D word editing keys
 - Add command, subcommand and option completion from PATH and man pages with inline ghost text, value hints and Tab / Shift+Tab cycling
+- Update README with completion cycling, word navigation keys and command completion
