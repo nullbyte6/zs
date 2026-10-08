@@ -6,12 +6,14 @@ const commands = @import("commands.zig");
 const ast = @import("ast.zig");
 const arith = @import("arith.zig");
 const glob = @import("glob.zig");
+const functions = @import("functions.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
     exit: u8,
     loop_break: u8,
     loop_continue: u8,
+    fn_return: u8,
 };
 
 pub const Flow = union(enum) {
@@ -19,8 +21,11 @@ pub const Flow = union(enum) {
     exit: u8,
     break_loop: u8,
     continue_loop: u8,
+    return_fn: u8,
     interrupted,
 };
+
+const max_call_depth = 1000;
 
 var sigint_seen = false;
 
@@ -46,11 +51,13 @@ fn restoreDefaultSignals() void {
 pub const Shell = struct {
     last_status: u8 = 0,
     substitution_status: u8 = 0,
+    call_depth: usize = 0,
 
     pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!?u8 {
         const flow = try self.runText(arena, line, lines);
         return switch (flow) {
             .exit => |code| code,
+            .return_fn => |code| code,
             else => null,
         };
     }
@@ -148,6 +155,12 @@ pub const Shell = struct {
                 self.last_status = status;
                 return .normal;
             },
+            .group => |body| return self.execList(arena, body, lines),
+            .function => |definition| {
+                functions.define(definition.name, definition.body) catch return error.OutOfMemory;
+                self.last_status = 0;
+                return .normal;
+            },
             .case_clause => |clause| {
                 const subject = try self.expandSingle(arena, clause.subject, .text, lines);
                 for (clause.arms) |arm| {
@@ -224,6 +237,7 @@ pub const Shell = struct {
                 const flow = self.execNode(arena, stage, lines) catch posix.exit(1);
                 posix.exit(switch (flow) {
                     .exit => |code| code,
+                    .return_fn => |code| code,
                     else => self.last_status,
                 });
             }
@@ -283,6 +297,7 @@ pub const Shell = struct {
                 .exit => |code| return .{ .exit = code },
                 .loop_break => |levels| return .{ .break_loop = levels },
                 .loop_continue => |levels| return .{ .continue_loop = levels },
+                .fn_return => |code| return .{ .return_fn = code },
             }
             if (sigint_seen) {
                 sigint_seen = false;
@@ -296,11 +311,13 @@ pub const Shell = struct {
         const cmds = pipeline.commands;
         if (cmds.len == 1) {
             const cmd = cmds[0];
-            if (cmd.argv.len == 0 or isBuiltin(cmd.argv[0])) {
+            const is_function = cmd.argv.len > 0 and functions.has(cmd.argv[0]);
+            if (cmd.argv.len == 0 or is_function or isBuiltin(cmd.argv[0])) {
                 const saved = saveStandardFds();
                 defer restoreStandardFds(saved);
                 if (!applyRedirects(cmd.redirects)) return .{ .status = 1 };
                 if (cmd.argv.len == 0) return .{ .status = assign(cmd.assignments) };
+                if (is_function) return self.callFunction(cmd.argv);
                 return self.builtin(arena, cmd.argv).?;
             }
         }
@@ -353,20 +370,72 @@ pub const Shell = struct {
         }
         if (!applyRedirects(cmd.redirects)) posix.exit(1);
         if (cmd.argv.len == 0) posix.exit(assign(cmd.assignments));
+        if (functions.has(cmd.argv[0])) {
+            const outcome = self.callFunction(cmd.argv) catch posix.exit(1);
+            switch (outcome) {
+                .status, .exit, .fn_return => |code| posix.exit(code),
+                else => posix.exit(0),
+            }
+        }
         if (self.builtin(arena, cmd.argv)) |outcome| {
             switch (outcome) {
                 .status => |status| posix.exit(status),
                 .exit => |code| posix.exit(code),
+                .fn_return => |code| posix.exit(code),
                 else => posix.exit(0),
             }
         }
         execute(arena, cmd);
     }
 
+    fn callFunction(self: *Shell, argv: []const []const u8) anyerror!Outcome {
+        if (self.call_depth >= max_call_depth) {
+            printError("{s}: maximum function nesting level exceeded ({d})", .{ argv[0], max_call_depth });
+            return .{ .status = 1 };
+        }
+        var scope = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scope.deinit();
+        const arena = scope.allocator();
+        const source = try arena.dupe(u8, functions.get(argv[0]).?);
+        const list = ast.parse(arena, source) catch {
+            printError("{s}: invalid function body", .{argv[0]});
+            return .{ .status = 2 };
+        };
+        try vars.pushFrame(argv[1..]);
+        defer vars.popFrame();
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+        const flow = try self.execList(arena, list, null);
+        return switch (flow) {
+            .normal, .break_loop, .continue_loop => .{ .status = self.last_status },
+            .return_fn => |code| .{ .status = code },
+            .exit => |code| .{ .exit = code },
+            .interrupted => blk: {
+                sigint_seen = true;
+                break :blk .{ .status = 130 };
+            },
+        };
+    }
+
+    fn returnFromFunction(self: *Shell, args: []const []const u8) Outcome {
+        if (self.call_depth == 0) {
+            printError("return: can only return from a function", .{});
+            return .{ .status = 1 };
+        }
+        if (args.len == 0) return .{ .fn_return = self.last_status };
+        const code = std.fmt.parseInt(i64, args[0], 10) catch {
+            printError("return: {s}: numeric argument required", .{args[0]});
+            return .{ .fn_return = 2 };
+        };
+        return .{ .fn_return = @intCast(@mod(code, 256)) };
+    }
+
     fn builtin(self: *Shell, arena: std.mem.Allocator, argv: []const []const u8) ?Outcome {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "local")) return .{ .status = localVariables(argv[1..]) };
+        if (std.mem.eql(u8, name, "return")) return self.returnFromFunction(argv[1..]);
         if (std.mem.eql(u8, name, "read")) return .{ .status = readLine(argv[1..]) };
         if (std.mem.eql(u8, name, "break")) return loopControl(argv[1..], true);
         if (std.mem.eql(u8, name, "continue")) return loopControl(argv[1..], false);
@@ -614,9 +683,45 @@ fn exportVariables(arena: std.mem.Allocator, args: []const []const u8) u8 {
     return status;
 }
 
+fn localVariables(args: []const []const u8) u8 {
+    if (!vars.inFunction()) {
+        printError("local: can only be used in a function", .{});
+        return 1;
+    }
+    var status: u8 = 0;
+    for (args) |arg| {
+        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const name = if (eq) |i| arg[0..i] else arg;
+        if (!parser.isName(name)) {
+            printError("local: '{s}': not a valid identifier", .{arg});
+            status = 1;
+            continue;
+        }
+        vars.declareLocal(name) catch {
+            printError("out of memory", .{});
+            return 1;
+        };
+        if (eq) |i| vars.set(name, arg[i + 1 ..]) catch {
+            printError("out of memory", .{});
+            return 1;
+        };
+    }
+    return status;
+}
+
 fn unsetVariables(args: []const []const u8) u8 {
     var status: u8 = 0;
-    for (args) |name| {
+    var names = args;
+    var functions_only = false;
+    while (names.len > 0 and (std.mem.eql(u8, names[0], "-f") or std.mem.eql(u8, names[0], "-v"))) {
+        functions_only = names[0][1] == 'f';
+        names = names[1..];
+    }
+    for (names) |name| {
+        if (functions_only) {
+            _ = functions.remove(name);
+            continue;
+        }
         if (!parser.isName(name)) {
             printError("unset: '{s}': not a valid identifier", .{name});
             status = 1;

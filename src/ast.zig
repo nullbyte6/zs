@@ -42,6 +42,11 @@ pub const CaseClause = struct {
     arms: []const CaseArm,
 };
 
+pub const FunctionDef = struct {
+    name: []const u8,
+    body: []const u8,
+};
+
 pub const Redirected = struct {
     node: *const Node,
     redirs: []const u8,
@@ -56,6 +61,8 @@ pub const Node = union(enum) {
     loop: Loop,
     for_clause: ForClause,
     case_clause: CaseClause,
+    group: List,
+    function: FunctionDef,
 };
 
 pub const Error = error{ Incomplete, Syntax, OutOfMemory };
@@ -75,7 +82,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8) Error!List {
     return p.parseList(&.{});
 }
 
-const reserved = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case", "esac" };
+const reserved = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case", "esac", "}" };
 
 const Parser = struct {
     arena: std.mem.Allocator,
@@ -158,6 +165,9 @@ const Parser = struct {
         if (std.mem.eql(u8, word, "while") or std.mem.eql(u8, word, "until")) return self.parseLoop();
         if (std.mem.eql(u8, word, "for")) return self.parseFor();
         if (std.mem.eql(u8, word, "case")) return self.parseCase();
+        if (std.mem.eql(u8, word, "{")) return self.parseGroup();
+        if (std.mem.eql(u8, word, "function")) return self.parseFunction(true);
+        if (parser.isName(word) and self.hasEmptyParens(self.pos + word.len)) return self.parseFunction(false);
         if (isOneOf(&reserved, word)) return error.Syntax;
         return .{ .simple = try self.scanSpan() };
     }
@@ -284,6 +294,49 @@ const Parser = struct {
         if (body.len == 0) return error.Syntax;
         self.pos += 4;
         return .{ .for_clause = .{ .name = name, .words = words, .body = body } };
+    }
+
+    fn parseGroup(self: *Parser) Error!Node {
+        self.pos += 1;
+        const body = try self.parseList(&.{"}"});
+        if (body.len == 0) return error.Syntax;
+        self.pos += 1;
+        return .{ .group = body };
+    }
+
+    fn hasEmptyParens(self: *Parser, index: usize) bool {
+        var i = index;
+        while (i < self.text.len and (self.text[i] == ' ' or self.text[i] == '\t')) i += 1;
+        if (i >= self.text.len or self.text[i] != '(') return false;
+        i += 1;
+        while (i < self.text.len and (self.text[i] == ' ' or self.text[i] == '\t')) i += 1;
+        return i < self.text.len and self.text[i] == ')';
+    }
+
+    fn parseFunction(self: *Parser, keyword: bool) Error!Node {
+        if (keyword) {
+            self.pos += 8;
+            self.skipBlanks();
+        }
+        const name = self.peekWord();
+        if (!parser.isName(name)) return if (self.eof()) error.Incomplete else error.Syntax;
+        self.pos += name.len;
+        self.skipBlanks();
+        if (!self.eof() and self.text[self.pos] == '(') {
+            self.pos += 1;
+            self.skipBlanks();
+            if (self.eof() or self.text[self.pos] != ')') return error.Syntax;
+            self.pos += 1;
+        } else if (!keyword) {
+            return error.Syntax;
+        }
+        self.skipWhitespace();
+        if (self.eof()) return error.Incomplete;
+        const start = self.pos;
+        var body = try self.parseCommand();
+        if (body == .simple or body == .function) return error.Syntax;
+        body = try self.attachRedirects(body);
+        return .{ .function = .{ .name = name, .body = self.text[start..self.pos] } };
     }
 
     fn parseCase(self: *Parser) Error!Node {
@@ -421,7 +474,7 @@ fn compoundStartsAt(text: []const u8, index: usize) bool {
     var end = index;
     while (end < text.len and std.mem.indexOfScalar(u8, " \t\n;&|<>()'\"`$\\#", text[end]) == null) end += 1;
     const word = text[index..end];
-    return std.mem.eql(u8, word, "if") or std.mem.eql(u8, word, "while") or std.mem.eql(u8, word, "until") or std.mem.eql(u8, word, "for") or std.mem.eql(u8, word, "case");
+    return std.mem.eql(u8, word, "if") or std.mem.eql(u8, word, "while") or std.mem.eql(u8, word, "until") or std.mem.eql(u8, word, "for") or std.mem.eql(u8, word, "case") or std.mem.eql(u8, word, "{");
 }
 
 fn skipDouble(text: []const u8, start: usize) Error!usize {

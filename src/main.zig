@@ -1,6 +1,7 @@
 const std = @import("std");
 const Editor = @import("editor.zig").Editor;
 const executor = @import("executor.zig");
+const functions = @import("functions.zig");
 const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
 const vars = @import("vars.zig");
@@ -22,6 +23,8 @@ pub fn main() !u8 {
 
     try vars.init(allocator);
     defer vars.deinit();
+    functions.init(allocator);
+    defer functions.deinit();
 
     const stderr = std.io.getStdErr().writer();
 

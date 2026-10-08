@@ -1,11 +1,13 @@
 const std = @import("std");
 const posix = std.posix;
 const vars = @import("vars.zig");
+const functions = @import("functions.zig");
 
-pub const builtins = [_][]const u8{ "cd", "exit", "export", "unset", "break", "continue", "read" };
+pub const builtins = [_][]const u8{ "cd", "exit", "export", "unset", "break", "continue", "read", "local", "return" };
 
 pub fn exists(name: []const u8) bool {
     if (name.len == 0) return false;
+    if (functions.has(name)) return true;
     for (builtins) |builtin| {
         if (std.mem.eql(u8, builtin, name)) return true;
     }

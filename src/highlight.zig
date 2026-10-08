@@ -70,9 +70,16 @@ pub fn render(writer: anytype, line: []const u8) !void {
                     expect_command = false;
                     for_state = 1;
                     is_case = std.mem.eql(u8, word, "case");
+                } else if (std.mem.eql(u8, word, "function")) {
+                    expect_command = false;
+                    for_state = 3;
                 } else if (std.mem.eql(u8, word, "esac") and case_depth > 0) {
                     case_depth -= 1;
                 }
+            } else if (for_state == 3) {
+                try renderWord(writer, word, command_color);
+                for_state = 0;
+                expect_command = true;
             } else if (for_state == 1) {
                 try renderWord(writer, word, argument_color);
                 for_state = 2;
@@ -83,6 +90,12 @@ pub fn render(writer: anytype, line: []const u8) !void {
                     case_depth += 1;
                     in_patterns = true;
                 }
+            } else if (std.mem.eql(u8, word, "()")) {
+                try renderWord(writer, word, argument_color);
+            } else if (expect_command and std.mem.eql(u8, word, "{")) {
+                try renderWord(writer, word, argument_color);
+            } else if (expect_command and definesFunction(line, i, end)) {
+                try renderWord(writer, word, command_color);
             } else if (expect_command and std.mem.startsWith(u8, word, "((")) {
                 try renderWord(writer, word, argument_color);
                 expect_command = false;
@@ -100,6 +113,18 @@ pub fn render(writer: anytype, line: []const u8) !void {
             i = end;
         }
     }
+}
+
+fn definesFunction(line: []const u8, start: usize, end: usize) bool {
+    const word = line[start..end];
+    if (std.mem.endsWith(u8, word, "()")) return parser.isName(word[0 .. word.len - 2]);
+    if (!parser.isName(word)) return false;
+    var i = end;
+    while (i < line.len and isSpace(line[i])) i += 1;
+    if (i >= line.len or line[i] != '(') return false;
+    i += 1;
+    while (i < line.len and isSpace(line[i])) i += 1;
+    return i < line.len and line[i] == ')';
 }
 
 fn isKeyword(word: []const u8) bool {

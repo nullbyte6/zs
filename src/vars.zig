@@ -9,6 +9,19 @@ var allocator: std.mem.Allocator = undefined;
 var values: std.StringHashMapUnmanaged([]u8) = .{};
 var exported: std.StringHashMapUnmanaged(void) = .{};
 
+const Saved = struct {
+    name: []u8,
+    value: ?[]u8,
+    exported: bool,
+};
+
+const Frame = struct {
+    params: std.ArrayListUnmanaged([]u8) = .{},
+    saved: std.ArrayListUnmanaged(Saved) = .{},
+};
+
+var frames: std.ArrayListUnmanaged(Frame) = .{};
+
 pub fn init(gpa: std.mem.Allocator) !void {
     allocator = gpa;
     for (std.os.environ) |entry_z| {
@@ -30,6 +43,7 @@ pub fn deinit() void {
     var export_it = exported.keyIterator();
     while (export_it.next()) |key| allocator.free(key.*);
     exported.deinit(allocator);
+    frames.deinit(allocator);
 }
 
 pub fn get(name: []const u8) ?[]const u8 {
@@ -99,4 +113,54 @@ fn isOverlaid(overlay: []const Assignment, name: []const u8) bool {
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
+}
+
+pub fn pushFrame(args: []const []const u8) !void {
+    var frame = Frame{};
+    errdefer freeFrame(&frame);
+    for (args) |arg| try frame.params.append(allocator, try allocator.dupe(u8, arg));
+    try frames.append(allocator, frame);
+}
+
+pub fn popFrame() void {
+    var frame = frames.pop() orelse return;
+    var index = frame.saved.items.len;
+    while (index > 0) : (index -= 1) {
+        const entry = frame.saved.items[index - 1];
+        if (entry.value) |old| {
+            set(entry.name, old) catch {};
+            if (entry.exported) markExported(entry.name) catch {};
+        } else {
+            unset(entry.name);
+        }
+    }
+    freeFrame(&frame);
+}
+
+fn freeFrame(frame: *Frame) void {
+    for (frame.params.items) |param| allocator.free(param);
+    frame.params.deinit(allocator);
+    for (frame.saved.items) |entry| {
+        allocator.free(entry.name);
+        if (entry.value) |value| allocator.free(value);
+    }
+    frame.saved.deinit(allocator);
+}
+
+pub fn inFunction() bool {
+    return frames.items.len > 0;
+}
+
+pub fn declareLocal(name: []const u8) !void {
+    if (frames.items.len == 0) return;
+    const frame = &frames.items[frames.items.len - 1];
+    for (frame.saved.items) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return;
+    }
+    const key = try allocator.dupe(u8, name);
+    errdefer allocator.free(key);
+    const old: ?[]u8 = if (values.get(name)) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (old) |value| allocator.free(value);
+    try frame.saved.append(allocator, .{ .name = key, .value = old, .exported = exported.contains(name) });
+    unset(name);
 }
