@@ -19,6 +19,8 @@ pub fn main() !void {
         const input = std.mem.trim(u8, line, " \t\r");
         if (input.len == 0) continue;
 
+        try editor.addHistory(input);
+
         if (std.mem.eql(u8, input, "exit")) break;
 
         try stdout.print("zs: command execution not implemented: {s}\n", .{input});

@@ -9,23 +9,46 @@ const Position = struct {
 };
 
 pub const Editor = struct {
+    allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8),
+    history: std.ArrayList([]u8),
+    history_pos: usize = 0,
+    draft: ?[]u8 = null,
     cursor: usize = 0,
     cursor_row: usize = 0,
     prompt: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, prompt: []const u8) Editor {
-        return .{ .buffer = .init(allocator), .prompt = prompt };
+        return .{
+            .allocator = allocator,
+            .buffer = .init(allocator),
+            .history = .init(allocator),
+            .prompt = prompt,
+        };
     }
 
     pub fn deinit(self: *Editor) void {
         self.buffer.deinit();
+        for (self.history.items) |entry| self.allocator.free(entry);
+        self.history.deinit();
+        self.clearDraft();
+    }
+
+    pub fn addHistory(self: *Editor, line: []const u8) !void {
+        if (self.history.getLastOrNull()) |last| {
+            if (std.mem.eql(u8, last, line)) return;
+        }
+        const copy = try self.allocator.dupe(u8, line);
+        errdefer self.allocator.free(copy);
+        try self.history.append(copy);
     }
 
     pub fn readLine(self: *Editor) !?[]const u8 {
         self.buffer.clearRetainingCapacity();
         self.cursor = 0;
         self.cursor_row = 0;
+        self.history_pos = self.history.items.len;
+        self.clearDraft();
 
         const original = posix.tcgetattr(posix.STDIN_FILENO) catch |err| switch (err) {
             error.NotATerminal => return self.readPlain(),
@@ -95,6 +118,12 @@ pub const Editor = struct {
                     try self.deleteForward();
                 },
                 1 => self.cursor = 0,
+                12 => {
+                    try stdout.writeAll("\x1b[H\x1b[2J");
+                    self.cursor_row = 0;
+                },
+                14 => try self.historyNext(),
+                16 => try self.historyPrevious(),
                 5 => self.cursor = self.buffer.items.len,
                 2 => self.cursor = prevBoundary(self.buffer.items, self.cursor),
                 6 => self.cursor = nextBoundary(self.buffer.items, self.cursor),
@@ -108,6 +137,37 @@ pub const Editor = struct {
                 else => {},
             }
             try self.redraw();
+        }
+    }
+
+    fn clearDraft(self: *Editor) void {
+        if (self.draft) |draft| self.allocator.free(draft);
+        self.draft = null;
+    }
+
+    fn loadLine(self: *Editor, text: []const u8) !void {
+        self.buffer.clearRetainingCapacity();
+        try self.buffer.appendSlice(text);
+        self.cursor = self.buffer.items.len;
+    }
+
+    fn historyPrevious(self: *Editor) !void {
+        if (self.history_pos == 0) return;
+        if (self.history_pos == self.history.items.len) {
+            self.clearDraft();
+            self.draft = try self.allocator.dupe(u8, self.buffer.items);
+        }
+        self.history_pos -= 1;
+        try self.loadLine(self.history.items[self.history_pos]);
+    }
+
+    fn historyNext(self: *Editor) !void {
+        if (self.history_pos >= self.history.items.len) return;
+        self.history_pos += 1;
+        if (self.history_pos == self.history.items.len) {
+            try self.loadLine(self.draft orelse "");
+        } else {
+            try self.loadLine(self.history.items[self.history_pos]);
         }
     }
 
@@ -173,6 +233,8 @@ pub const Editor = struct {
         const param = params[0..params_len];
 
         switch (final) {
+            'A' => try self.historyPrevious(),
+            'B' => try self.historyNext(),
             'C' => self.cursor = nextBoundary(self.buffer.items, self.cursor),
             'D' => self.cursor = prevBoundary(self.buffer.items, self.cursor),
             'H' => self.cursor = 0,
