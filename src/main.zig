@@ -47,6 +47,7 @@ pub fn main() !u8 {
 
     var command: ?[]const u8 = null;
     var force_interactive = false;
+    var login = argv.len > 0 and argv[0].len > 0 and argv[0][0] == '-';
     var index: usize = 1;
     while (index < argv.len) : (index += 1) {
         const arg = argv[index];
@@ -55,7 +56,10 @@ pub fn main() !u8 {
             break;
         }
         if (arg.len < 2 or arg[0] != '-') break;
-        if (std.mem.eql(u8, arg, "--login")) continue;
+        if (std.mem.eql(u8, arg, "--login")) {
+            login = true;
+            continue;
+        }
         for (arg[1..]) |flag| switch (flag) {
             'c' => {
                 index += 1;
@@ -66,7 +70,8 @@ pub fn main() !u8 {
                 command = argv[index];
             },
             'i' => force_interactive = true,
-            'l', 's' => {},
+            'l' => login = true,
+            's' => {},
             else => {
                 try stderr.print("zs: -{c}: invalid option\n", .{flag});
                 return 2;
@@ -78,6 +83,10 @@ pub fn main() !u8 {
     if (interactive) executor.ignoreInteractiveSignals();
 
     var shell = executor.Shell{};
+
+    if (login) {
+        if (rc.loadProfiles(allocator, &shell)) |code| return code;
+    }
 
     if (command) |text| {
         if (index + 1 < argv.len) try vars.setParams(argv[index + 1 ..]);

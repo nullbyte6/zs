@@ -38,6 +38,23 @@ pub fn load(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
     return result;
 }
 
+pub fn loadProfiles(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
+    if (profile(allocator, shell, "/etc/profile", "/etc/profile")) |code| return code;
+    const home = vars.get("HOME") orelse return null;
+    const path = std.fmt.allocPrint(allocator, "{s}/.profile", .{home}) catch return null;
+    defer allocator.free(path);
+    return profile(allocator, shell, path, "~/.profile");
+}
+
+fn profile(allocator: std.mem.Allocator, shell: *executor.Shell, path: []const u8, label: []const u8) ?u8 {
+    const result = runFile(allocator, shell, path, label) catch |err| {
+        if (err != error.FileNotFound) diag.warning("{s}: cannot read: {s}", .{ label, @errorName(err) });
+        return null;
+    };
+    shell.last_status = 0;
+    return result;
+}
+
 pub fn runFile(allocator: std.mem.Allocator, shell: *executor.Shell, path: []const u8, label: []const u8) !?u8 {
     const text = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 20);
     defer allocator.free(text);

@@ -51,3 +51,4 @@
 - Add OSC 133 prompt markers so terminals like kitty can tell an idle prompt from a running command
 - Fix accept -c, -l and -i options so zs works as a login shell
 - Add exec builtin to replace the shell process with a command
+- Add /etc/profile and ~/.profile loading for login shells
