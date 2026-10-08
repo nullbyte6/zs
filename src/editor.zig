@@ -17,6 +17,7 @@ pub const Editor = struct {
     draft: ?[]u8 = null,
     cursor: usize = 0,
     cursor_row: usize = 0,
+    marks: bool = false,
     prompt: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, prompt: []const u8) Editor {
@@ -102,6 +103,7 @@ pub const Editor = struct {
                 '\r', '\n' => {
                     try self.finishLine();
                     try stdout.writeAll("\r\n");
+                    if (self.marks) try stdout.writeAll("\x1b]133;C\x07");
                     return self.buffer.items;
                 },
                 3 => {
@@ -334,7 +336,9 @@ pub const Editor = struct {
 
         if (self.cursor_row > 0) try w.print("\x1b[{d}A", .{self.cursor_row});
         try w.writeAll("\r\x1b[J");
+        if (self.marks) try w.writeAll("\x1b]133;A\x07");
         try w.writeAll(self.prompt);
+        if (self.marks) try w.writeAll("\x1b]133;B\x07");
         try highlight.render(w, self.buffer.items);
 
         var end = Position{};

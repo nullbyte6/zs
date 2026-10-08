@@ -48,3 +48,4 @@
 - Add set -e and set -u options, including set -o errexit/nounset and combined flags
 - Update function definitions to accept hyphens and dots in names
 - Add : builtin
+- Add OSC 133 prompt markers so terminals like kitty can tell an idle prompt from a running command

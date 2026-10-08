@@ -17,6 +17,11 @@ fn nextContinuationLine(context: *anyopaque, arena: std.mem.Allocator) ?[]const 
     return arena.dupe(u8, line) catch null;
 }
 
+fn supportsPromptMarks() bool {
+    const term = vars.get("TERM") orelse return false;
+    return term.len > 0 and !std.mem.eql(u8, term, "dumb") and !std.mem.eql(u8, term, "linux");
+}
+
 fn renderPrompt(shell: *executor.Shell, arena: std.mem.Allocator, color: bool) []const u8 {
     const rendered = prompt.render(arena, prompt.format(), color, shell.last_status) catch return "zs>> ";
     return shell.expandText(arena, rendered);
@@ -35,6 +40,7 @@ pub fn main() !u8 {
     defer prompt.deinit();
 
     const stderr = std.io.getStdErr().writer();
+    const stdout = std.io.getStdOut().writer();
 
     const interactive = std.io.getStdIn().isTty();
     if (interactive) executor.ignoreInteractiveSignals();
@@ -42,16 +48,23 @@ pub fn main() !u8 {
     var shell = executor.Shell{};
     var editor = Editor.init(allocator, "");
     defer editor.deinit();
+    editor.marks = interactive and supportsPromptMarks();
+    var command_pending = false;
 
     if (interactive) {
         if (rc.load(allocator, &shell)) |code| return code;
     }
 
     while (true) {
+        if (command_pending) {
+            try stdout.print("\x1b]133;D;{d}\x07", .{shell.last_status});
+            command_pending = false;
+        }
         var prompt_arena = std.heap.ArenaAllocator.init(allocator);
         defer prompt_arena.deinit();
         editor.prompt = renderPrompt(&shell, prompt_arena.allocator(), interactive);
         const line = try editor.readLine() orelse break;
+        command_pending = editor.marks;
 
         const input = std.mem.trim(u8, line, " \t\r");
         if (input.len == 0) continue;
