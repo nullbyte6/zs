@@ -45,3 +45,4 @@
 - Update install.sh to offer adding zs to /etc/shells
 - Add set builtin with set -- to replace positional parameters and set alone to list variables
 - Add nounset support that rejects unset variable and positional parameter expansions
+- Add set -e and set -u options, including set -o errexit/nounset and combined flags

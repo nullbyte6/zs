@@ -56,6 +56,8 @@ pub const Shell = struct {
     substitution_status: u8 = 0,
     call_depth: usize = 0,
     source_depth: usize = 0,
+    errexit: bool = false,
+    errexit_suspend: usize = 0,
 
     pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!?u8 {
         const flow = try self.runText(arena, line, lines);
@@ -86,15 +88,20 @@ pub const Shell = struct {
     }
 
     fn execList(self: *Shell, arena: std.mem.Allocator, list: ast.List, lines: ?parser.LineSource) anyerror!Flow {
-        for (list) |item| {
+        for (list, 0..) |item, index| {
             const should_run = switch (item.join) {
                 .always => true,
                 .and_if => self.last_status == 0,
                 .or_if => self.last_status != 0,
             };
             if (!should_run) continue;
-            const flow = try self.execNode(arena, item.node, lines);
+            const chained = index + 1 < list.len and list[index + 1].join != .always;
+            if (chained) self.errexit_suspend += 1;
+            const result = self.execNode(arena, item.node, lines);
+            if (chained) self.errexit_suspend -= 1;
+            const flow = try result;
             if (flow != .normal) return flow;
+            if (self.errexit and self.errexit_suspend == 0 and !chained and self.last_status != 0) return .{ .exit = self.last_status };
         }
         return .normal;
     }
@@ -132,7 +139,7 @@ pub const Shell = struct {
             .pipeline => |stages| return self.execPipelineNodes(arena, stages, lines),
             .if_clause => |clause| {
                 for (clause.branches) |branch| {
-                    const cond_flow = try self.execList(arena, branch.cond, lines);
+                    const cond_flow = try self.execCondition(arena, branch.cond, lines);
                     if (cond_flow != .normal) return cond_flow;
                     if (self.last_status == 0) return self.execList(arena, branch.body, lines);
                 }
@@ -143,7 +150,7 @@ pub const Shell = struct {
             .loop => |loop| {
                 var status: u8 = 0;
                 while (true) {
-                    const cond_flow = try self.execList(arena, loop.cond, lines);
+                    const cond_flow = try self.execCondition(arena, loop.cond, lines);
                     if (cond_flow != .normal) return cond_flow;
                     if ((self.last_status == 0) == loop.until) break;
                     const body_flow = try self.execList(arena, loop.body, lines);
@@ -206,6 +213,12 @@ pub const Shell = struct {
                 return .normal;
             },
         }
+    }
+
+    fn execCondition(self: *Shell, arena: std.mem.Allocator, list: ast.List, lines: ?parser.LineSource) anyerror!Flow {
+        self.errexit_suspend += 1;
+        defer self.errexit_suspend -= 1;
+        return self.execList(arena, list, lines);
     }
 
     fn execSubshell(self: *Shell, arena: std.mem.Allocator, body: ast.List, lines: ?parser.LineSource) anyerror!Flow {
@@ -322,7 +335,11 @@ pub const Shell = struct {
                 .or_if => self.last_status != 0,
             };
             if (!should_run) continue;
-            switch (try self.runPipeline(arena, pipeline)) {
+            const chained = p.pending_join != .always;
+            if (chained) self.errexit_suspend += 1;
+            const outcome = self.runPipeline(arena, pipeline);
+            if (chained) self.errexit_suspend -= 1;
+            switch (try outcome) {
                 .status => |status| self.last_status = status,
                 .exit => |code| return .{ .exit = code },
                 .loop_break => |levels| return .{ .break_loop = levels },
@@ -332,6 +349,9 @@ pub const Shell = struct {
             if (sigint_seen) {
                 sigint_seen = false;
                 return .interrupted;
+            }
+            if (self.errexit and self.errexit_suspend == 0 and p.pending_join == .always and self.last_status != 0) {
+                return .{ .exit = self.last_status };
             }
         }
         return .normal;
@@ -486,6 +506,63 @@ pub const Shell = struct {
         return .{ .status = self.last_status };
     }
 
+    fn setOptions(self: *Shell, arena: std.mem.Allocator, args: []const []const u8) u8 {
+        if (args.len == 0) {
+            const names = vars.variableNames(arena) catch return 1;
+            const stdout = std.io.getStdOut().writer();
+            for (names) |name| {
+                stdout.print("{s}={s}\n", .{ name, vars.get(name) orelse "" }) catch return 1;
+            }
+            return 0;
+        }
+        var index: usize = 0;
+        var set_params = false;
+        while (index < args.len) : (index += 1) {
+            const arg = args[index];
+            if (std.mem.eql(u8, arg, "--")) {
+                index += 1;
+                set_params = true;
+                break;
+            }
+            if (arg.len < 2 or (arg[0] != '-' and arg[0] != '+')) {
+                set_params = true;
+                break;
+            }
+            const enable = arg[0] == '-';
+            if (arg[1] == 'o' and arg.len == 2) {
+                index += 1;
+                if (index >= args.len) {
+                    printError("set: -o: option requires an argument", .{});
+                    return 2;
+                }
+                if (!self.setOption(optionLetter(args[index]), enable, args[index])) return 2;
+                continue;
+            }
+            for (arg[1..]) |letter| {
+                if (!self.setOption(letter, enable, arg)) return 2;
+            }
+        }
+        if (set_params) {
+            vars.setParams(args[index..]) catch {
+                printError("out of memory", .{});
+                return 1;
+            };
+        }
+        return 0;
+    }
+
+    fn setOption(self: *Shell, letter: u8, enable: bool, original: []const u8) bool {
+        switch (letter) {
+            'e' => self.errexit = enable,
+            'u' => vars.nounset = enable,
+            else => {
+                printError("set: {s}: invalid option", .{original});
+                return false;
+            },
+        }
+        return true;
+    }
+
     fn returnFromFunction(self: *Shell, args: []const []const u8) Outcome {
         if (self.call_depth == 0) {
             printError("return: can only return from a function", .{});
@@ -503,7 +580,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
-        if (std.mem.eql(u8, name, "set")) return .{ .status = setParameters(arena, argv[1..]) };
+        if (std.mem.eql(u8, name, "set")) return .{ .status = self.setOptions(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "shift")) return .{ .status = shiftParameters(argv[1..]) };
@@ -788,26 +865,9 @@ fn promptCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
     return 0;
 }
 
-fn setParameters(arena: std.mem.Allocator, args: []const []const u8) u8 {
-    if (args.len == 0) {
-        const names = vars.variableNames(arena) catch return 1;
-        const stdout = std.io.getStdOut().writer();
-        for (names) |name| {
-            stdout.print("{s}={s}\n", .{ name, vars.get(name) orelse "" }) catch return 1;
-        }
-        return 0;
-    }
-    var rest = args;
-    if (std.mem.eql(u8, args[0], "--")) {
-        rest = args[1..];
-    } else if (args[0].len > 1 and (args[0][0] == '-' or args[0][0] == '+')) {
-        printError("set: {s}: invalid option", .{args[0]});
-        return 2;
-    }
-    vars.setParams(rest) catch {
-        printError("out of memory", .{});
-        return 1;
-    };
+fn optionLetter(name: []const u8) u8 {
+    if (std.mem.eql(u8, name, "errexit")) return 'e';
+    if (std.mem.eql(u8, name, "nounset")) return 'u';
     return 0;
 }
 
