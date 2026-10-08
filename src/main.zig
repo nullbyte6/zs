@@ -42,10 +42,54 @@ pub fn main() !u8 {
     const stderr = std.io.getStdErr().writer();
     const stdout = std.io.getStdOut().writer();
 
-    const interactive = std.io.getStdIn().isTty();
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+
+    var command: ?[]const u8 = null;
+    var force_interactive = false;
+    var index: usize = 1;
+    while (index < argv.len) : (index += 1) {
+        const arg = argv[index];
+        if (std.mem.eql(u8, arg, "--")) {
+            index += 1;
+            break;
+        }
+        if (arg.len < 2 or arg[0] != '-') break;
+        if (std.mem.eql(u8, arg, "--login")) continue;
+        for (arg[1..]) |flag| switch (flag) {
+            'c' => {
+                index += 1;
+                if (index >= argv.len) {
+                    try stderr.writeAll("zs: -c: option requires an argument\n");
+                    return 2;
+                }
+                command = argv[index];
+            },
+            'i' => force_interactive = true,
+            'l', 's' => {},
+            else => {
+                try stderr.print("zs: -{c}: invalid option\n", .{flag});
+                return 2;
+            },
+        };
+    }
+
+    const interactive = command == null and (force_interactive or std.io.getStdIn().isTty());
     if (interactive) executor.ignoreInteractiveSignals();
 
     var shell = executor.Shell{};
+
+    if (command) |text| {
+        if (index + 1 < argv.len) try vars.setParams(argv[index + 1 ..]);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const exit_code = shell.run(arena.allocator(), text, null) catch |err| {
+            try stderr.print("zs: {s}\n", .{parser.message(err) orelse @errorName(err)});
+            return 2;
+        };
+        return exit_code orelse shell.last_status;
+    }
+
     var editor = Editor.init(allocator, "");
     defer editor.deinit();
     editor.marks = interactive and supportsPromptMarks();

@@ -49,3 +49,4 @@
 - Update function definitions to accept hyphens and dots in names
 - Add : builtin
 - Add OSC 133 prompt markers so terminals like kitty can tell an idle prompt from a running command
+- Fix accept -c, -l and -i options so zs works as a login shell
