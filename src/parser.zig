@@ -50,8 +50,19 @@ pub const Error = error{
     BadArithmetic,
     DivideByZero,
     ParameterNull,
+    UnboundVariable,
     OutOfMemory,
 };
+
+var unbound_name: [128]u8 = undefined;
+var unbound_name_len: usize = 0;
+var unbound_message: [160]u8 = undefined;
+
+fn unbound(name: []const u8) error{UnboundVariable} {
+    unbound_name_len = @min(name.len, unbound_name.len);
+    @memcpy(unbound_name[0..unbound_name_len], name[0..unbound_name_len]);
+    return error.UnboundVariable;
+}
 
 pub fn message(err: anyerror) ?[]const u8 {
     return switch (err) {
@@ -62,6 +73,7 @@ pub fn message(err: anyerror) ?[]const u8 {
         error.BadArithmetic => "syntax error in arithmetic expression",
         error.DivideByZero => "division by zero in arithmetic expression",
         error.ParameterNull => "parameter null or not set",
+        error.UnboundVariable => std.fmt.bufPrint(&unbound_message, "{s}: unbound variable", .{unbound_name[0..unbound_name_len]}) catch "unbound variable",
         error.MissingCommand => "syntax error: missing command",
         error.BadSubstitution => "syntax error: bad substitution",
         error.Syntax => "syntax error: unexpected token or keyword",
@@ -488,6 +500,7 @@ pub const Parser = struct {
             return .{ .value = try self.substituteCommand(text[i + 1 .. close]), .end = close + 1 };
         }
         if (i < text.len and (std.mem.indexOfScalar(u8, "?#$@*", text[i]) != null or std.ascii.isDigit(text[i]))) {
+            if (vars.nounset and std.ascii.isDigit(text[i]) and text[i] != '0' and text[i] - '0' > vars.params().len) return unbound(text[i .. i + 1]);
             return .{ .value = try self.special(text[i .. i + 1]), .end = i + 1 };
         }
         if (i < text.len and text[i] == '{') {
@@ -497,7 +510,11 @@ pub const Parser = struct {
         var end = i;
         while (end < text.len and isNameChar(text[end], end == i)) end += 1;
         if (end == i) return null;
-        return .{ .value = vars.get(text[i..end]) orelse "", .end = end };
+        const value = vars.get(text[i..end]) orelse {
+            if (vars.nounset) return unbound(text[i..end]);
+            return .{ .value = "", .end = end };
+        };
+        return .{ .value = value, .end = end };
     }
 
     fn lookup(self: *Parser, name: []const u8) Error!?[]const u8 {
@@ -518,7 +535,10 @@ pub const Parser = struct {
                 return std.fmt.allocPrint(self.arena, "{d}", .{vars.params().len});
             }
             if (!isName(target) and !isDigits(target)) return error.BadSubstitution;
-            const value = (try self.lookup(target)) orelse "";
+            const value = (try self.lookup(target)) orelse {
+                if (vars.nounset) return unbound(target);
+                return "0";
+            };
             const length = std.unicode.utf8CountCodepoints(value) catch value.len;
             return std.fmt.allocPrint(self.arena, "{d}", .{length});
         }
@@ -534,7 +554,11 @@ pub const Parser = struct {
         const name = content[0..name_end];
         const rest = content[name_end..];
         const current = try self.lookup(name);
-        if (rest.len == 0) return current orelse "";
+        if (rest.len == 0) {
+            if (current) |value| return value;
+            if (vars.nounset) return unbound(name);
+            return "";
+        }
 
         const colon = rest[0] == ':';
         const op_index: usize = if (colon) 1 else 0;

@@ -6,6 +6,7 @@ pub const Assignment = struct {
 };
 
 pub var shell_pid: i32 = 0;
+pub var nounset = false;
 
 var allocator: std.mem.Allocator = undefined;
 var values: std.StringHashMapUnmanaged([]u8) = .{};
