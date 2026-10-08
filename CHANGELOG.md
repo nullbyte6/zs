@@ -54,3 +54,4 @@
 - Add /etc/profile and ~/.profile loading for login shells
 - Add history-based inline suggestions accepted with Right arrow or End
 - Add persistent history file loaded at startup and history builtin with -c to clear it
+- Update README with features, installation, shell language, builtins, prompt customization and internals
