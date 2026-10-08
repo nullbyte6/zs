@@ -23,6 +23,7 @@ pub fn render(writer: anytype, line: []const u8) !void {
     var is_case = false;
     var case_depth: usize = 0;
     var in_patterns = false;
+    var paren_depth: usize = 0;
     while (i < line.len) {
         const c = line[i];
         if (isSpace(c)) {
@@ -43,8 +44,24 @@ pub fn render(writer: anytype, line: []const u8) !void {
             try writer.writeAll(line[i..end]);
             try writer.writeAll(reset);
             i = end;
+        } else if (c == '(' and expect_command and i + 1 < line.len and line[i + 1] != '(' and line[i + 1] != ')') {
+            try writeColored(writer, flag_color, "(");
+            paren_depth += 1;
+            i += 1;
+        } else if (c == ')' and paren_depth > 0 and !in_patterns) {
+            try writeColored(writer, flag_color, ")");
+            paren_depth -= 1;
+            expect_command = false;
+            i += 1;
         } else {
-            const end = wordEnd(line, i);
+            var end = wordEnd(line, i);
+            if (paren_depth > 0 and !in_patterns) {
+                var trailing: usize = 0;
+                while (end - trailing > i + 1 and line[end - 1 - trailing] == ')') trailing += 1;
+                const opens = std.mem.count(u8, line[i..end], "(");
+                const closes = std.mem.count(u8, line[i..end], ")");
+                end -= @min(trailing, if (closes > opens) closes - opens else 0);
+            }
             const word = line[i..end];
             if (end < line.len and (line[end] == '<' or line[end] == '>') and isDigits(word)) {
                 try writer.writeAll(symbol_color);
@@ -171,7 +188,12 @@ fn wordEnd(line: []const u8, start: usize) usize {
     var i = start;
     while (i < line.len and !isSpace(line[i]) and !isOperator(line[i])) {
         switch (line[i]) {
-            '$' => i = if (i + 1 < line.len and line[i + 1] == '(') (if (parser.findParenEnd(line, i + 1)) |close| close + 1 else line.len) else i + 1,
+            '$' => i = if (i + 1 < line.len and line[i + 1] == '(')
+                (if (parser.findParenEnd(line, i + 1)) |close| close + 1 else line.len)
+            else if (i + 1 < line.len and line[i + 1] == '{')
+                (if (parser.findBraceEnd(line, i + 1)) |close| close + 1 else line.len)
+            else
+                i + 1,
             '`' => i = if (std.mem.indexOfScalarPos(u8, line, i + 1, '`')) |close| close + 1 else line.len,
             '\'', '"' => i = quoteEnd(line, i),
             '\\' => i += if (i + 1 < line.len) 2 else 1,
