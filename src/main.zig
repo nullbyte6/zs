@@ -1,4 +1,5 @@
 const std = @import("std");
+const aliases = @import("aliases.zig");
 const arith = @import("arith.zig");
 const Editor = @import("editor.zig").Editor;
 const executor = @import("executor.zig");
@@ -43,6 +44,8 @@ pub fn main() !u8 {
     defer prompt.deinit();
     history.init(allocator);
     defer history.deinit();
+    aliases.init(allocator);
+    defer aliases.deinit();
     spec.init(allocator);
     defer spec.deinit();
 
@@ -112,6 +115,7 @@ pub fn main() !u8 {
     var command_pending = false;
 
     if (interactive) {
+        if (rc.loadAliases(allocator, &shell)) |code| return code;
         if (rc.load(allocator, &shell)) |code| return code;
         history.load();
     }

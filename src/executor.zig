@@ -11,6 +11,7 @@ const prompts = @import("prompt.zig");
 const diag = @import("diag.zig");
 const rc = @import("rc.zig");
 const history = @import("history.zig");
+const aliases = @import("aliases.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -30,6 +31,12 @@ pub const Flow = union(enum) {
 };
 
 const max_call_depth = 1000;
+const max_alias_depth = 16;
+
+const Resolved = union(enum) {
+    plain: parser.Command,
+    script: []const u8,
+};
 
 var sigint_seen = false;
 
@@ -358,8 +365,69 @@ pub const Shell = struct {
         return .normal;
     }
 
+    fn resolveAliases(self: *Shell, arena: std.mem.Allocator, command: parser.Command) !Resolved {
+        var current = command;
+        var depth: usize = 0;
+        while (current.argv.len > 0 and depth < max_alias_depth) : (depth += 1) {
+            const name = current.argv[0];
+            const value = aliases.get(name) orelse break;
+            var p = parser.Parser.init(arena, value);
+            p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
+            const first = (try p.next(self.last_status)) orelse break;
+            const single = first.commands.len == 1 and first.commands[0].argv.len > 0 and
+                first.commands[0].redirects.len == 0 and first.commands[0].assignments.len == 0;
+            if (!single or (try p.next(self.last_status)) != null) {
+                var script = std.ArrayList(u8).init(arena);
+                try script.appendSlice(value);
+                for (current.argv[1..]) |arg| {
+                    try script.appendSlice(" '");
+                    for (arg) |c| {
+                        if (c == '\'') try script.appendSlice("'\\''") else try script.append(c);
+                    }
+                    try script.append('\'');
+                }
+                return .{ .script = script.items };
+            }
+            const head = first.commands[0].argv;
+            const merged = try arena.alloc([]const u8, head.len + current.argv.len - 1);
+            @memcpy(merged[0..head.len], head);
+            @memcpy(merged[head.len..], current.argv[1..]);
+            current.argv = merged;
+            if (std.mem.eql(u8, head[0], name)) break;
+        }
+        return .{ .plain = current };
+    }
+
+    fn runScript(self: *Shell, arena: std.mem.Allocator, command: parser.Command, script: []const u8) !Outcome {
+        if (self.call_depth >= max_call_depth) {
+            printError("{s}: maximum alias nesting level exceeded ({d})", .{ command.argv[0], max_call_depth });
+            return .{ .status = 1 };
+        }
+        const saved = saveStandardFds();
+        defer restoreStandardFds(saved);
+        if (!applyRedirects(command.redirects)) return .{ .status = 1 };
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+        const flow = try self.runText(arena, script, null);
+        return switch (flow) {
+            .normal, .interrupted => .{ .status = self.last_status },
+            .exit => |code| .{ .exit = code },
+            .return_fn => |code| .{ .fn_return = code },
+            .break_loop => |levels| .{ .loop_break = levels },
+            .continue_loop => |levels| .{ .loop_continue = levels },
+        };
+    }
+
     fn runPipeline(self: *Shell, arena: std.mem.Allocator, pipeline: parser.Pipeline) !Outcome {
-        const cmds = pipeline.commands;
+        const cmds = try arena.alloc(parser.Command, pipeline.commands.len);
+        for (pipeline.commands, 0..) |original, i| {
+            cmds[i] = original;
+            if (original.argv.len == 0 or !aliases.has(original.argv[0])) continue;
+            switch (try self.resolveAliases(arena, original)) {
+                .plain => |resolved| cmds[i] = resolved,
+                .script => |script| if (cmds.len == 1) return self.runScript(arena, original, script),
+            }
+        }
         if (cmds.len == 1) {
             const cmd = cmds[0];
             const is_function = cmd.argv.len > 0 and functions.has(cmd.argv[0]);
@@ -584,6 +652,8 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, ":")) return .{ .status = 0 };
         if (std.mem.eql(u8, name, "exec")) return .{ .status = replaceProcess(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "history")) return .{ .status = historyCommand(argv[1..]) };
+        if (std.mem.eql(u8, name, "alias")) return .{ .status = aliasCommand(arena, argv[1..]) };
+        if (std.mem.eql(u8, name, "unalias")) return .{ .status = unaliasCommand(argv[1..]) };
         if (std.mem.eql(u8, name, "set")) return .{ .status = self.setOptions(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
@@ -986,6 +1056,60 @@ fn exitShell(last_status: u8, args: []const []const u8) Outcome {
         return .{ .exit = 2 };
     };
     return .{ .exit = @intCast(@mod(code, 256)) };
+}
+
+fn printAlias(writer: anytype, name: []const u8, value: []const u8) !void {
+    try writer.print("alias {s}='", .{name});
+    for (value) |c| {
+        if (c == '\'') try writer.writeAll("'\\''") else try writer.writeByte(c);
+    }
+    try writer.writeAll("'\n");
+}
+
+fn aliasCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
+    const stdout = std.io.getStdOut().writer();
+    var status: u8 = 0;
+    if (args.len == 0) {
+        const names = aliases.names(arena) catch return 1;
+        for (names) |name| printAlias(stdout, name, aliases.get(name).?) catch return 1;
+        return 0;
+    }
+    for (args) |arg| {
+        if (std.mem.indexOfScalar(u8, arg, '=')) |eq| {
+            const name = arg[0..eq];
+            if (name.len == 0 or std.mem.indexOfAny(u8, name, " \t/$`\"'\\|&;<>()") != null) {
+                printError("alias: `{s}': invalid alias name", .{name});
+                status = 1;
+                continue;
+            }
+            aliases.define(name, arg[eq + 1 ..]) catch {
+                status = 1;
+            };
+        } else if (aliases.get(arg)) |value| {
+            printAlias(stdout, arg, value) catch return 1;
+        } else {
+            printError("alias: {s}: not found", .{arg});
+            status = 1;
+        }
+    }
+    return status;
+}
+
+fn unaliasCommand(args: []const []const u8) u8 {
+    if (args.len == 0) {
+        printError("unalias: usage: unalias [-a] name [name ...]", .{});
+        return 2;
+    }
+    var status: u8 = 0;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-a")) {
+            aliases.clear();
+        } else if (!aliases.remove(arg)) {
+            printError("unalias: {s}: not found", .{arg});
+            status = 1;
+        }
+    }
+    return status;
 }
 
 fn historyCommand(args: []const []const u8) u8 {

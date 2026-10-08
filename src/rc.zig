@@ -38,6 +38,13 @@ pub fn load(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
     return result;
 }
 
+pub fn loadAliases(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
+    const home = vars.get("HOME") orelse return null;
+    const path = std.fmt.allocPrint(allocator, "{s}/.bash_aliases", .{home}) catch return null;
+    defer allocator.free(path);
+    return profile(allocator, shell, path, "~/.bash_aliases");
+}
+
 pub fn loadProfiles(allocator: std.mem.Allocator, shell: *executor.Shell) ?u8 {
     if (profile(allocator, shell, "/etc/profile", "/etc/profile")) |code| return code;
     const home = vars.get("HOME") orelse return null;
