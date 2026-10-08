@@ -32,8 +32,15 @@ pub const ForClause = struct {
     body: List,
 };
 
+pub const Redirected = struct {
+    node: *const Node,
+    redirs: []const u8,
+};
+
 pub const Node = union(enum) {
     simple: []const u8,
+    pipeline: []const Node,
+    redirected: Redirected,
     arith: []const u8,
     if_clause: IfClause,
     loop: Loop,
@@ -105,7 +112,7 @@ const Parser = struct {
                 if (need_command) return error.Syntax;
                 break;
             }
-            const node = try self.parseCommand();
+            const node = try self.finishCommand(try self.parseCommand());
             try items.append(.{ .node = node, .join = join });
             join = .always;
             need_command = false;
@@ -133,6 +140,75 @@ const Parser = struct {
         if (std.mem.eql(u8, word, "for")) return self.parseFor();
         if (isOneOf(&reserved, word)) return error.Syntax;
         return .{ .simple = try self.scanSpan() };
+    }
+
+    fn finishCommand(self: *Parser, first: Node) Error!Node {
+        var current = first;
+        if (current != .simple) current = try self.attachRedirects(current);
+        self.skipBlanks();
+        if (!self.atPipe()) return current;
+        var stages = std.ArrayList(Node).init(self.arena);
+        try stages.append(current);
+        while (self.atPipe()) {
+            self.pos += 1;
+            while (self.pos < self.text.len and std.mem.indexOfScalar(u8, " \t\n", self.text[self.pos]) != null) self.pos += 1;
+            if (self.eof()) return error.Incomplete;
+            var stage = try self.parseCommand();
+            if (stage != .simple) stage = try self.attachRedirects(stage);
+            try stages.append(stage);
+            self.skipBlanks();
+        }
+        return .{ .pipeline = stages.items };
+    }
+
+    fn atPipe(self: *Parser) bool {
+        if (self.pos >= self.text.len or self.text[self.pos] != '|') return false;
+        return !(self.pos + 1 < self.text.len and self.text[self.pos + 1] == '|');
+    }
+
+    fn attachRedirects(self: *Parser, node: Node) Error!Node {
+        const redirs = try self.scanRedirects();
+        if (redirs.len == 0) return node;
+        const boxed = try self.arena.create(Node);
+        boxed.* = node;
+        return .{ .redirected = .{ .node = boxed, .redirs = redirs } };
+    }
+
+    fn scanRedirects(self: *Parser) Error![]const u8 {
+        const text = self.text;
+        self.skipBlanks();
+        const start = self.pos;
+        while (true) {
+            self.skipBlanks();
+            var i = self.pos;
+            while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
+            const is_amp = i == self.pos and i + 1 < text.len and text[i] == '&' and text[i + 1] == '>';
+            if (!(i < text.len and (text[i] == '<' or text[i] == '>')) and !is_amp) break;
+            if (std.mem.startsWith(u8, text[i..], "<<")) return error.Syntax;
+            while (i < text.len and std.mem.indexOfScalar(u8, "<>&", text[i]) != null) i += 1;
+            self.pos = i;
+            self.skipBlanks();
+            const word_start = self.pos;
+            var j = word_start;
+            while (j < text.len and std.mem.indexOfScalar(u8, " \t\n;&|<>", text[j]) == null) {
+                switch (text[j]) {
+                    '\'' => j = (std.mem.indexOfScalarPos(u8, text, j + 1, '\'') orelse return error.Incomplete) + 1,
+                    '"' => j = try skipDouble(text, j),
+                    '\\' => j = @min(j + 2, text.len),
+                    '$' => {
+                        if (j + 1 < text.len and text[j + 1] == '(') {
+                            j = (parser.findParenEnd(text, j + 1) orelse return error.Incomplete) + 1;
+                        } else {
+                            j += 1;
+                        }
+                    },
+                    else => j += 1,
+                }
+            }
+            if (j == word_start) return error.Syntax;
+            self.pos = j;
+        }
+        return std.mem.trim(u8, text[start..self.pos], " \t");
     }
 
     fn parseArith(self: *Parser) Error!Node {
@@ -218,6 +294,9 @@ const Parser = struct {
                 },
                 '|' => {
                     if (i + 1 < text.len and text[i + 1] == '|') break :scan;
+                    var j = i + 1;
+                    while (j < text.len and std.mem.indexOfScalar(u8, " \t\n", text[j]) != null) j += 1;
+                    if (compoundStartsAt(text, j)) break :scan;
                     i += 1;
                 },
                 '\\' => i = @min(i + 2, text.len),
@@ -252,6 +331,14 @@ const Parser = struct {
         return self.peekWord();
     }
 };
+
+fn compoundStartsAt(text: []const u8, index: usize) bool {
+    if (std.mem.startsWith(u8, text[index..], "((")) return true;
+    var end = index;
+    while (end < text.len and std.mem.indexOfScalar(u8, " \t\n;&|<>()'\"`$\\#", text[end]) == null) end += 1;
+    const word = text[index..end];
+    return std.mem.eql(u8, word, "if") or std.mem.eql(u8, word, "while") or std.mem.eql(u8, word, "until") or std.mem.eql(u8, word, "for");
+}
 
 fn skipDouble(text: []const u8, start: usize) Error!usize {
     var i = start + 1;

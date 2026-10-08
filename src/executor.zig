@@ -103,6 +103,17 @@ pub const Shell = struct {
                 self.last_status = if (value != 0) 0 else 1;
                 return .normal;
             },
+            .redirected => |wrapped| {
+                const redirect_command = try self.redirectCommand(arena, wrapped.redirs, lines);
+                const saved = saveStandardFds();
+                defer restoreStandardFds(saved);
+                if (!applyRedirects(redirect_command.redirects)) {
+                    self.last_status = 1;
+                    return .normal;
+                }
+                return self.execNode(arena, wrapped.node.*, lines);
+            },
+            .pipeline => |stages| return self.execPipelineNodes(arena, stages, lines),
             .if_clause => |clause| {
                 for (clause.branches) |branch| {
                     const cond_flow = try self.execList(arena, branch.cond, lines);
@@ -159,6 +170,69 @@ pub const Shell = struct {
                 return .normal;
             },
         }
+    }
+
+    fn redirectCommand(self: *Shell, arena: std.mem.Allocator, text: []const u8, lines: ?parser.LineSource) anyerror!parser.Command {
+        var p = parser.Parser.init(arena, text);
+        p.lines = lines;
+        p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
+        const pipeline = (try p.next(self.last_status)) orelse return error.UnexpectedEof;
+        return pipeline.commands[0];
+    }
+
+    fn execPipelineNodes(self: *Shell, arena: std.mem.Allocator, stages: []const ast.Node, lines: ?parser.LineSource) anyerror!Flow {
+        const pids = try arena.alloc(posix.pid_t, stages.len);
+        var input: ?posix.fd_t = null;
+        var spawned: usize = 0;
+        for (stages, 0..) |stage, i| {
+            const output: ?[2]posix.fd_t = if (i + 1 == stages.len) null else try posix.pipe();
+            const pid = posix.fork() catch |err| {
+                if (input) |fd| posix.close(fd);
+                if (output) |fds| {
+                    posix.close(fds[0]);
+                    posix.close(fds[1]);
+                }
+                var interrupted = false;
+                for (pids[0..spawned]) |spawned_pid| _ = reap(spawned_pid, &interrupted);
+                return err;
+            };
+            if (pid == 0) {
+                restoreDefaultSignals();
+                if (input) |fd| {
+                    posix.dup2(fd, posix.STDIN_FILENO) catch posix.exit(126);
+                    posix.close(fd);
+                }
+                if (output) |fds| {
+                    posix.dup2(fds[1], posix.STDOUT_FILENO) catch posix.exit(126);
+                    posix.close(fds[0]);
+                    posix.close(fds[1]);
+                }
+                const flow = self.execNode(arena, stage, lines) catch posix.exit(1);
+                posix.exit(switch (flow) {
+                    .exit => |code| code,
+                    else => self.last_status,
+                });
+            }
+            pids[i] = pid;
+            spawned += 1;
+            if (input) |fd| posix.close(fd);
+            if (output) |fds| {
+                posix.close(fds[1]);
+                input = fds[0];
+            } else {
+                input = null;
+            }
+        }
+        var status: u8 = 0;
+        var interrupted = false;
+        for (pids) |pid| status = reap(pid, &interrupted);
+        self.last_status = status;
+        if (interrupted) {
+            std.io.getStdOut().writeAll("\n") catch {};
+            sigint_seen = false;
+            return .interrupted;
+        }
+        return .normal;
     }
 
     fn expandWords(self: *Shell, arena: std.mem.Allocator, text: []const u8, lines: ?parser.LineSource) anyerror![]const []const u8 {
@@ -269,6 +343,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "read")) return .{ .status = readLine(argv[1..]) };
         if (std.mem.eql(u8, name, "break")) return loopControl(argv[1..], true);
         if (std.mem.eql(u8, name, "continue")) return loopControl(argv[1..], false);
         if (std.mem.eql(u8, name, "export")) return .{ .status = exportVariables(arena, argv[1..]) };
@@ -388,6 +463,79 @@ fn applyRedirects(redirects: []const parser.Redirect) bool {
         }
     }
     return true;
+}
+
+fn readLine(args: []const []const u8) u8 {
+    var raw = false;
+    var prompt: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len and args[i].len > 1 and args[i][0] == '-') : (i += 1) {
+        if (std.mem.eql(u8, args[i], "-r")) {
+            raw = true;
+        } else if (std.mem.eql(u8, args[i], "-p")) {
+            i += 1;
+            if (i >= args.len) {
+                printError("read: -p: option requires an argument", .{});
+                return 2;
+            }
+            prompt = args[i];
+        } else if (std.mem.eql(u8, args[i], "--")) {
+            i += 1;
+            break;
+        } else {
+            printError("read: {s}: invalid option", .{args[i]});
+            return 2;
+        }
+    }
+    const names = args[i..];
+    for (names) |name| {
+        if (!parser.isName(name)) {
+            printError("read: '{s}': not a valid identifier", .{name});
+            return 1;
+        }
+    }
+    if (prompt) |text| std.io.getStdErr().writeAll(text) catch {};
+
+    var line = std.ArrayList(u8).init(std.heap.page_allocator);
+    defer line.deinit();
+    var reached_eof = false;
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const count = posix.read(posix.STDIN_FILENO, &byte) catch 0;
+        if (count == 0) {
+            reached_eof = true;
+            break;
+        }
+        if (byte[0] == '\n') break;
+        if (!raw and byte[0] == '\\') {
+            const escaped = posix.read(posix.STDIN_FILENO, &byte) catch 0;
+            if (escaped == 0) {
+                reached_eof = true;
+                break;
+            }
+            if (byte[0] == '\n') continue;
+        }
+        line.append(byte[0]) catch return 1;
+    }
+
+    const ifs = vars.get("IFS") orelse " \t\n";
+    if (names.len == 0) {
+        vars.set("REPLY", line.items) catch return 1;
+    } else {
+        var rest: []const u8 = line.items;
+        for (names, 0..) |name, index| {
+            rest = std.mem.trimLeft(u8, rest, ifs);
+            if (index + 1 == names.len) {
+                vars.set(name, std.mem.trimRight(u8, rest, ifs)) catch return 1;
+                rest = "";
+            } else {
+                const end = std.mem.indexOfAny(u8, rest, ifs) orelse rest.len;
+                vars.set(name, rest[0..end]) catch return 1;
+                rest = rest[end..];
+            }
+        }
+    }
+    return if (reached_eof) 1 else 0;
 }
 
 fn loopControl(args: []const []const u8, is_break: bool) Outcome {
