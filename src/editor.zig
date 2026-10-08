@@ -376,6 +376,11 @@ fn advance(pos: *Position, text: []const u8, cols: usize) void {
             i += 1;
             continue;
         }
+        if (text[i] == '\n') {
+            pos.* = .{ .row = pos.row + 1 };
+            i += 1;
+            continue;
+        }
         const glyph = unicode.glyphAt(text, i);
         i += glyph.len;
         if (glyph.width == 0) continue;

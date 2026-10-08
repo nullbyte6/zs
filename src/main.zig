@@ -16,6 +16,11 @@ fn nextContinuationLine(context: *anyopaque, arena: std.mem.Allocator) ?[]const 
     return arena.dupe(u8, line) catch null;
 }
 
+fn renderPrompt(shell: *executor.Shell, arena: std.mem.Allocator, color: bool) []const u8 {
+    const rendered = prompt.render(arena, prompt.format(), color, shell.last_status) catch return "zs>> ";
+    return shell.expandText(arena, rendered);
+}
+
 pub fn main() !u8 {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -25,6 +30,8 @@ pub fn main() !u8 {
     defer vars.deinit();
     functions.init(allocator);
     defer functions.deinit();
+    prompt.init(allocator);
+    defer prompt.deinit();
 
     const stderr = std.io.getStdErr().writer();
 
@@ -35,9 +42,10 @@ pub fn main() !u8 {
     var editor = Editor.init(allocator, "");
     defer editor.deinit();
 
-    var prompt_buf: [1024]u8 = undefined;
     while (true) {
-        editor.prompt = prompt.build(&prompt_buf, interactive);
+        var prompt_arena = std.heap.ArenaAllocator.init(allocator);
+        defer prompt_arena.deinit();
+        editor.prompt = renderPrompt(&shell, prompt_arena.allocator(), interactive);
         const line = try editor.readLine() orelse break;
 
         const input = std.mem.trim(u8, line, " \t\r");

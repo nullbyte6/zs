@@ -7,6 +7,8 @@ const ast = @import("ast.zig");
 const arith = @import("arith.zig");
 const glob = @import("glob.zig");
 const functions = @import("functions.zig");
+const prompts = @import("prompt.zig");
+const diag = @import("diag.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -414,6 +416,13 @@ pub const Shell = struct {
         execute(arena, cmd);
     }
 
+    pub fn expandText(self: *Shell, arena: std.mem.Allocator, text: []const u8) []const u8 {
+        var p = parser.Parser.init(arena, text);
+        p.last_status = self.last_status;
+        p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
+        return p.expandBody(text) catch text;
+    }
+
     fn callFunction(self: *Shell, argv: []const []const u8) anyerror!Outcome {
         if (self.call_depth >= max_call_depth) {
             printError("{s}: maximum function nesting level exceeded ({d})", .{ argv[0], max_call_depth });
@@ -460,6 +469,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "shift")) return .{ .status = shiftParameters(argv[1..]) };
         if (std.mem.eql(u8, name, "local")) return .{ .status = localVariables(argv[1..]) };
         if (std.mem.eql(u8, name, "return")) return self.returnFromFunction(argv[1..]);
@@ -708,6 +718,38 @@ fn exportVariables(arena: std.mem.Allocator, args: []const []const u8) u8 {
         };
     }
     return status;
+}
+
+fn promptCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
+    const stdout = std.io.getStdOut().writer();
+    if (args.len == 0) {
+        stdout.print("{s}\n", .{prompts.format()}) catch return 1;
+        return 0;
+    }
+    if (args.len > 1) {
+        printError("zsprompt: too many arguments (quote the format)", .{});
+        return 2;
+    }
+    const arg = args[0];
+    if (std.mem.eql(u8, arg, "--reset")) {
+        prompts.reset();
+        return 0;
+    }
+    if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        stdout.writeAll(prompts.help) catch return 1;
+        return 0;
+    }
+    if (std.mem.startsWith(u8, arg, "--")) {
+        printError("zsprompt: {s}: invalid option", .{arg});
+        return 2;
+    }
+    const unknown = prompts.unknownEscapes(arena, arg) catch return 1;
+    if (unknown.len > 0) diag.warning("zsprompt: unknown escapes kept literally: {s}", .{unknown});
+    prompts.setFormat(arg) catch {
+        printError("out of memory", .{});
+        return 1;
+    };
+    return 0;
 }
 
 fn shiftParameters(args: []const []const u8) u8 {
