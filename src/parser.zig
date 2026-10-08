@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const glob = @import("glob.zig");
 const vars = @import("vars.zig");
+const arith = @import("arith.zig");
 
 pub const RedirectKind = enum { read, write, append, dup, heredoc };
 
@@ -44,6 +45,8 @@ pub const Error = error{
     MissingTarget,
     SubstitutionFailed,
     BadSubstitution,
+    BadArithmetic,
+    DivideByZero,
     OutOfMemory,
 };
 
@@ -53,6 +56,8 @@ pub fn message(err: anyerror) ?[]const u8 {
         error.UnsupportedOperator => "syntax error: unsupported operator",
         error.MissingTarget => "syntax error: missing redirection target",
         error.SubstitutionFailed => "command substitution failed",
+        error.BadArithmetic => "syntax error in arithmetic expression",
+        error.DivideByZero => "division by zero in arithmetic expression",
         error.MissingCommand => "syntax error: missing command",
         error.BadSubstitution => "syntax error: bad substitution",
         error.OutOfMemory => "out of memory",
@@ -418,8 +423,16 @@ pub const Parser = struct {
     fn dollar(self: *Parser, text: []const u8, start: usize) Error!?Expansion {
         const i = start + 1;
         if (i < text.len and text[i] == '(') {
-            if (i + 1 < text.len and text[i + 1] == '(') return error.UnsupportedOperator;
             const close = findParenEnd(text, i) orelse return error.UnterminatedQuote;
+            if (i + 1 < text.len and text[i + 1] == '(') {
+                if (close < i + 3 or text[close - 1] != ')') return error.UnsupportedOperator;
+                const expression = try self.expandBody(text[i + 2 .. close - 1]);
+                const result = arith.eval(expression) catch |err| return switch (err) {
+                    error.DivideByZero => error.DivideByZero,
+                    error.Syntax => error.BadArithmetic,
+                };
+                return .{ .value = try std.fmt.allocPrint(self.arena, "{d}", .{result}), .end = close + 1 };
+            }
             return .{ .value = try self.substituteCommand(text[i + 1 .. close]), .end = close + 1 };
         }
         if (i < text.len and text[i] == '?') {

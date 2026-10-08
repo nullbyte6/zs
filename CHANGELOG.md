@@ -25,3 +25,4 @@
 - Add here-documents with <<, <<- and quoted delimiters
 - Add &> and &>> to redirect both stdout and stderr
 - Add command substitution with $(...) and backticks
+- Add arithmetic expansion with $((...))
