@@ -38,7 +38,11 @@
   turns red.
 - Inline suggestions from your history, shown as dim text after the cursor.
 - Command completion shown as dim text while you type and cycled with `Tab`: commands from `PATH`, subcommands (`git sta` becomes `git status`), options read from the installed man pages (`--mes` becomes `--message=`), value hints such as `"msg"` after `-m`, builtins, functions and files. A match anywhere in the name is offered after the prefix matches.
-- Persistent history in `~/.zs_history`.
+- Persistent history in `~/.zs_history`, which can be turned off with `HISTAPPEND=off`.
+- A built-in calculator: type `1+2`, `4**4` or `3*7(5+6)` at the prompt and get the
+  result, following the usual order of operations (parentheses, exponents,
+  multiplication and division, addition and subtraction).
+- Bash-compatible aliases with `alias` and `unalias`, loaded from `~/.bash_aliases`.
 - A customizable prompt with colors, git branch, time and exit status, changed
   at runtime with `zsprompt`. See [prompt](#prompt).
 - Startup files: `~/.zsrc` for interactive shells and `/etc/profile` plus
@@ -237,6 +241,8 @@ an error. `set` with no arguments lists all variables.
 | `source FILE`, `. FILE`    | Run a file in the current shell                                           |
 | `exec COMMAND`             | Replace the shell process with a command                                  |
 | `history [-c]`             | List the history, or clear it with `-c`                                   |
+| `alias [NAME[=VALUE]...]`  | Define aliases, or list them                                              |
+| `unalias [-a] NAME...`     | Remove aliases, or all of them with `-a`                                  |
 | `zsprompt [FORMAT]`        | Show, set or reset the prompt. See [prompt](#prompt)                      |
 | `:`                        | Do nothing and succeed                                                    |
 
@@ -252,7 +258,8 @@ Everything else is looked up in `PATH` and run as an external command.
 | --------------- | ---------------------------- | --------------------------------------- |
 | `/etc/profile`  | Login shells                 | System-wide setup                       |
 | `~/.profile`    | Login shells                 | Per-user login setup                    |
-| `~/.zsrc`       | Interactive shells           | Aliases-style functions, exports, prompt |
+| `~/.bash_aliases` | Interactive shells         | Aliases shared with bash, read before `~/.zsrc` |
+| `~/.zsrc`       | Interactive shells           | Functions, exports, prompt, settings    |
 
 `~/.zsrc` is plain ZS syntax. A typical one:
 
@@ -264,6 +271,17 @@ mkcd() { mkdir -p "$1" && cd "$1"; }
 
 zsprompt '\e[1;35m\u\e[0m in \e[1;34m\w\e[0m \e[33m\g\e[0m\n\$ '
 ```
+
+`~/.bash_aliases` is the same file bash's `~/.bashrc` usually sources, so aliases
+are written once and work in both shells:
+
+```sh
+alias ll='ls -alF'
+alias gs='git status'
+```
+
+Set `HISTAPPEND=off` in `~/.zsrc` to stop writing new commands to the history
+file. The history of the running session is still kept in memory.
 
 Errors in startup files are reported as `zs: ~/.zsrc: ...` warnings and do not
 stop the shell.
@@ -329,6 +347,7 @@ lines and wide characters redraw correctly.
 | Variable   | Effect                                                          |
 | ---------- | --------------------------------------------------------------- |
 | `HISTFILE` | History file location. Defaults to `~/.zs_history`              |
+| `HISTAPPEND` | Set to `0`, `off`, `false` or `no` to stop appending to the history file |
 | `HOME`     | Used for `~`, `~/.zsrc`, `~/.profile` and the default history   |
 | `PATH`     | Searched for commands, validation and completion                |
 | `TERM`     | OSC 133 prompt marks are disabled for `dumb` and `linux`        |
@@ -350,11 +369,12 @@ lines and wide characters redraw correctly.
 | `src/executor.zig`    | Evaluation, pipelines, redirections, builtins, signals and jobs       |
 | `src/vars.zig`        | Shell and environment variables, positional parameters, scopes        |
 | `src/functions.zig`   | Registry of user-defined functions                                    |
-| `src/arith.zig`       | Integer evaluator for `$((...))` and `(( ... ))`                      |
+| `src/aliases.zig`     | Registry of aliases                                                   |
+| `src/arith.zig`       | Integer evaluator for `$((...))`, `(( ... ))` and the calculator      |
 | `src/glob.zig`        | Pattern matching and filesystem glob expansion                        |
 | `src/prompt.zig`      | Prompt formatting, git branch lookup and escape stripping             |
 | `src/history.zig`     | History storage backed by a file                                      |
-| `src/rc.zig`          | Loader for `~/.zsrc`, `/etc/profile` and `~/.profile`                 |
+| `src/rc.zig`          | Loader for `~/.bash_aliases`, `~/.zsrc`, `/etc/profile`, `~/.profile` |
 | `src/commands.zig`    | Builtin table and command existence checks                            |
 | `src/unicode.zig`     | Character widths for cursor placement                                 |
 | `src/diag.zig`        | Colored `zs:` warnings and errors                                     |

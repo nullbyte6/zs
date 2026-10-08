@@ -58,3 +58,7 @@
 - Add Alt+Backspace, Alt+Left/Right and Alt+D word editing keys
 - Add command, subcommand and option completion from PATH and man pages with inline ghost text, value hints and Tab / Shift+Tab cycling
 - Update README with completion cycling, word navigation keys and command completion
+- Add calculator for expressions typed at the prompt with exponents and implicit multiplication
+- Add alias and unalias builtins with aliases loaded from ~/.bash_aliases
+- Add HISTAPPEND setting to stop appending to the history file
+- Update README with calculator, aliases and HISTAPPEND
