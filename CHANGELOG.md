@@ -47,3 +47,4 @@
 - Add nounset support that rejects unset variable and positional parameter expansions
 - Add set -e and set -u options, including set -o errexit/nounset and combined flags
 - Update function definitions to accept hyphens and dots in names
+- Add : builtin

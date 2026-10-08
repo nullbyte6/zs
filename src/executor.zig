@@ -580,6 +580,7 @@ pub const Shell = struct {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, ":")) return .{ .status = 0 };
         if (std.mem.eql(u8, name, "set")) return .{ .status = self.setOptions(arena, argv[1..]) };
         if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return self.sourceFile(argv[1..]);
         if (std.mem.eql(u8, name, "zsprompt")) return .{ .status = promptCommand(arena, argv[1..]) };
