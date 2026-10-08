@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const vars = @import("vars.zig");
 
 const fallback = " >> ";
 
@@ -7,7 +8,7 @@ pub fn build(buf: []u8, color: bool) []const u8 {
     var host_buf: [posix.HOST_NAME_MAX]u8 = undefined;
     const full_host = posix.gethostname(&host_buf) catch "localhost";
     const host = full_host[0 .. std.mem.indexOfScalar(u8, full_host, '.') orelse full_host.len];
-    const user = posix.getenv("USER") orelse "user";
+    const user = vars.get("USER") orelse "user";
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.process.getCwd(&cwd_buf) catch return fallback;
@@ -23,7 +24,7 @@ pub fn build(buf: []u8, color: bool) []const u8 {
 }
 
 fn directoryName(cwd: []const u8) []const u8 {
-    if (posix.getenv("HOME")) |home| {
+    if (vars.get("HOME")) |home| {
         if (home.len > 0 and std.mem.eql(u8, cwd, home)) return "~";
     }
     if (std.mem.eql(u8, cwd, "/")) return "/";

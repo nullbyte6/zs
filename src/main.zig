@@ -3,11 +3,15 @@ const Editor = @import("editor.zig").Editor;
 const executor = @import("executor.zig");
 const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
+const vars = @import("vars.zig");
 
 pub fn main() !u8 {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    try vars.init(allocator);
+    defer vars.deinit();
 
     const stderr = std.io.getStdErr().writer();
 

@@ -1,7 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
+const vars = @import("vars.zig");
 
-pub const builtins = [_][]const u8{ "cd", "exit" };
+pub const builtins = [_][]const u8{ "cd", "exit", "export", "unset" };
 
 pub fn exists(name: []const u8) bool {
     if (name.len == 0) return false;
@@ -13,7 +14,7 @@ pub fn exists(name: []const u8) bool {
     const resolved = expandHome(&home_buf, name) orelse name;
     if (std.mem.indexOfScalar(u8, resolved, '/') != null) return isExecutable(resolved);
 
-    const path = posix.getenv("PATH") orelse return false;
+    const path = vars.get("PATH") orelse return false;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var dirs = std.mem.splitScalar(u8, path, ':');
     while (dirs.next()) |dir| {
@@ -25,7 +26,7 @@ pub fn exists(name: []const u8) bool {
 
 fn expandHome(buf: []u8, name: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, name, "~/")) return null;
-    const home = posix.getenv("HOME") orelse return null;
+    const home = vars.get("HOME") orelse return null;
     return std.fmt.bufPrint(buf, "{s}{s}", .{ home, name[1..] }) catch null;
 }
 

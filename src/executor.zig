@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const parser = @import("parser.zig");
+const vars = @import("vars.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -49,7 +50,9 @@ pub const Shell = struct {
     fn runPipeline(self: *Shell, arena: std.mem.Allocator, pipeline: parser.Pipeline) !Outcome {
         const cmds = pipeline.commands;
         if (cmds.len == 1) {
-            if (self.builtin(cmds[0].argv)) |outcome| return outcome;
+            const cmd = cmds[0];
+            if (cmd.argv.len == 0) return .{ .status = assign(cmd.assignments) };
+            if (self.builtin(arena, cmd.argv)) |outcome| return outcome;
         }
 
         const pids = try arena.alloc(posix.pid_t, cmds.len);
@@ -67,7 +70,7 @@ pub const Shell = struct {
                 for (pids[0..spawned]) |spawned_pid| _ = reap(spawned_pid, &interrupted);
                 return err;
             };
-            if (pid == 0) self.child(arena, cmd.argv, input, output);
+            if (pid == 0) self.child(arena, cmd, input, output);
 
             pids[i] = pid;
             spawned += 1;
@@ -87,7 +90,7 @@ pub const Shell = struct {
         return .{ .status = status };
     }
 
-    fn child(self: *Shell, arena: std.mem.Allocator, argv: []const []const u8, input: ?posix.fd_t, output: ?[2]posix.fd_t) noreturn {
+    fn child(self: *Shell, arena: std.mem.Allocator, cmd: parser.Command, input: ?posix.fd_t, output: ?[2]posix.fd_t) noreturn {
         restoreDefaultSignals();
         if (input) |fd| {
             posix.dup2(fd, posix.STDIN_FILENO) catch posix.exit(126);
@@ -98,22 +101,78 @@ pub const Shell = struct {
             posix.close(fds[0]);
             posix.close(fds[1]);
         }
-        if (self.builtin(argv)) |outcome| {
+        if (cmd.argv.len == 0) posix.exit(0);
+        if (self.builtin(arena, cmd.argv)) |outcome| {
             switch (outcome) {
                 .status => |status| posix.exit(status),
                 .exit => |code| posix.exit(code),
             }
         }
-        execute(arena, argv);
+        execute(arena, cmd);
     }
 
-    fn builtin(self: *Shell, argv: []const []const u8) ?Outcome {
+    fn builtin(self: *Shell, arena: std.mem.Allocator, argv: []const []const u8) ?Outcome {
         const name = argv[0];
         if (std.mem.eql(u8, name, "cd")) return .{ .status = changeDirectory(argv[1..]) };
         if (std.mem.eql(u8, name, "exit")) return exitShell(self.last_status, argv[1..]);
+        if (std.mem.eql(u8, name, "export")) return .{ .status = exportVariables(arena, argv[1..]) };
+        if (std.mem.eql(u8, name, "unset")) return .{ .status = unsetVariables(argv[1..]) };
         return null;
     }
 };
+
+fn assign(assignments: []const vars.Assignment) u8 {
+    for (assignments) |assignment| {
+        vars.set(assignment.name, assignment.value) catch {
+            printError("out of memory", .{});
+            return 1;
+        };
+    }
+    return 0;
+}
+
+fn exportVariables(arena: std.mem.Allocator, args: []const []const u8) u8 {
+    if (args.len == 0) {
+        const names = vars.exportedNames(arena) catch return 1;
+        const stdout = std.io.getStdOut().writer();
+        for (names) |name| {
+            stdout.print("export {s}=\"{s}\"\n", .{ name, vars.get(name) orelse "" }) catch return 1;
+        }
+        return 0;
+    }
+    var status: u8 = 0;
+    for (args) |arg| {
+        const eq = std.mem.indexOfScalar(u8, arg, '=');
+        const name = if (eq) |i| arg[0..i] else arg;
+        if (!parser.isName(name)) {
+            printError("export: '{s}': not a valid identifier", .{arg});
+            status = 1;
+            continue;
+        }
+        if (eq) |i| vars.set(name, arg[i + 1 ..]) catch {
+            printError("out of memory", .{});
+            return 1;
+        };
+        vars.markExported(name) catch {
+            printError("out of memory", .{});
+            return 1;
+        };
+    }
+    return status;
+}
+
+fn unsetVariables(args: []const []const u8) u8 {
+    var status: u8 = 0;
+    for (args) |name| {
+        if (!parser.isName(name)) {
+            printError("unset: '{s}': not a valid identifier", .{name});
+            status = 1;
+            continue;
+        }
+        vars.unset(name);
+    }
+    return status;
+}
 
 fn changeDirectory(args: []const []const u8) u8 {
     if (args.len > 1) {
@@ -121,18 +180,39 @@ fn changeDirectory(args: []const []const u8) u8 {
         return 1;
     }
     var target: []const u8 = undefined;
-    if (args.len == 1) {
+    var announce = false;
+    if (args.len == 1 and std.mem.eql(u8, args[0], "-")) {
+        target = vars.get("OLDPWD") orelse {
+            printError("cd: OLDPWD is not set", .{});
+            return 1;
+        };
+        announce = true;
+    } else if (args.len == 1) {
         target = args[0];
     } else {
-        target = posix.getenv("HOME") orelse {
+        target = vars.get("HOME") orelse {
             printError("cd: HOME is not set", .{});
             return 1;
         };
     }
+
+    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const old: ?[]u8 = std.process.getCwd(&old_buf) catch null;
     posix.chdir(target) catch |err| {
         printError("cd: {s}: {s}", .{ target, describe(err) });
         return 1;
     };
+
+    var new_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.process.getCwd(&new_buf)) |new| {
+        if (old) |previous| {
+            vars.set("OLDPWD", previous) catch {};
+            vars.markExported("OLDPWD") catch {};
+        }
+        vars.set("PWD", new) catch {};
+        vars.markExported("PWD") catch {};
+        if (announce) std.io.getStdOut().writer().print("{s}\n", .{new}) catch {};
+    } else |_| {}
     return 0;
 }
 
@@ -145,13 +225,14 @@ fn exitShell(last_status: u8, args: []const []const u8) Outcome {
     return .{ .exit = @intCast(@mod(code, 256)) };
 }
 
-fn execute(arena: std.mem.Allocator, argv: []const []const u8) noreturn {
+fn execute(arena: std.mem.Allocator, cmd: parser.Command) noreturn {
+    const argv = cmd.argv;
     const argv_z = arena.allocSentinel(?[*:0]const u8, argv.len, null) catch posix.exit(1);
     for (argv, 0..) |arg, i| {
         argv_z[i] = (arena.dupeZ(u8, arg) catch posix.exit(1)).ptr;
     }
-    const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.os.environ.ptr);
-    const err = posix.execvpeZ(argv_z[0].?, argv_z.ptr, envp);
+    const envp = vars.environ(arena, cmd.assignments) catch posix.exit(1);
+    const err = searchAndExec(arena, argv[0], cmd.assignments, argv_z.ptr, envp.ptr);
     switch (err) {
         error.FileNotFound => {
             if (std.mem.indexOfScalar(u8, argv[0], '/') != null) {
@@ -166,6 +247,32 @@ fn execute(arena: std.mem.Allocator, argv: []const []const u8) noreturn {
             posix.exit(126);
         },
     }
+}
+
+fn searchAndExec(
+    arena: std.mem.Allocator,
+    name: []const u8,
+    assignments: []const vars.Assignment,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+) posix.ExecveError {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return posix.execveZ(argv[0].?, argv, envp);
+
+    var path: []const u8 = vars.get("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
+    for (assignments) |assignment| {
+        if (std.mem.eql(u8, assignment.name, "PATH")) path = assignment.value;
+    }
+    var denied = false;
+    var dirs = std.mem.splitScalar(u8, path, ':');
+    while (dirs.next()) |dir| {
+        const candidate = std.fmt.allocPrintZ(arena, "{s}/{s}", .{ if (dir.len == 0) "." else dir, name }) catch return error.SystemResources;
+        switch (posix.execveZ(candidate, argv, envp)) {
+            error.FileNotFound, error.NotDir => {},
+            error.AccessDenied => denied = true,
+            else => |err| return err,
+        }
+    }
+    return if (denied) error.AccessDenied else error.FileNotFound;
 }
 
 fn reap(pid: posix.pid_t, interrupted: *bool) u8 {

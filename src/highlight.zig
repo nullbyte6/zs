@@ -23,12 +23,26 @@ pub fn render(writer: anytype, line: []const u8) !void {
         } else {
             const end = wordEnd(line, i);
             const word = line[i..end];
+            if (expect_command and isAssignment(word)) {
+                try renderWord(writer, word, argument_color);
+                i = end;
+                continue;
+            }
             const color = if (expect_command) commandColor(word) else if (c == '-') flag_color else argument_color;
             try renderWord(writer, word, color);
             expect_command = false;
             i = end;
         }
     }
+}
+
+fn isAssignment(word: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, word, '=') orelse return false;
+    if (eq == 0 or std.ascii.isDigit(word[0])) return false;
+    for (word[0..eq]) |c| {
+        if (c != '_' and !std.ascii.isAlphanumeric(c)) return false;
+    }
+    return true;
 }
 
 fn commandColor(word: []const u8) []const u8 {
