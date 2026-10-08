@@ -66,7 +66,17 @@ fn push(line: []const u8) !void {
     try entries.append(allocator, copy);
 }
 
+fn appendEnabled() bool {
+    const setting = vars.get("HISTAPPEND") orelse return true;
+    const disabled = [_][]const u8{ "0", "off", "false", "no", "never" };
+    for (disabled) |word| {
+        if (std.ascii.eqlIgnoreCase(setting, word)) return false;
+    }
+    return true;
+}
+
 fn persist(line: []const u8) void {
+    if (!appendEnabled()) return;
     const location = path orelse return;
     if (std.mem.indexOfScalar(u8, line, '\n') != null) return;
     const file = std.fs.cwd().createFile(location, .{ .truncate = false, .mode = 0o600 }) catch return;
