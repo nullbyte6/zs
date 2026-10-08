@@ -55,3 +55,5 @@
 - Add history-based inline suggestions accepted with Right arrow or End
 - Add persistent history file loaded at startup and history builtin with -c to clear it
 - Update README with features, installation, shell language, builtins, prompt customization and internals
+- Add Alt+Backspace, Alt+Left/Right and Alt+D word editing keys
+- Add command, subcommand and option completion from PATH and man pages with inline ghost text, value hints and Tab / Shift+Tab cycling

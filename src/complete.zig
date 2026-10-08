@@ -1,6 +1,7 @@
 const std = @import("std");
 const commands = @import("commands.zig");
 const functions = @import("functions.zig");
+const spec = @import("spec.zig");
 const vars = @import("vars.zig");
 
 const keywords = [_][]const u8{ "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case", "esac", "function", "select" };
@@ -8,8 +9,13 @@ const command_keywords = [_][]const u8{ "if", "then", "elif", "else", "while", "
 
 pub const Candidate = struct {
     text: []const u8,
+    suffix: []const u8 = " ",
+    rank: u8 = std.math.maxInt(u8),
+};
+
+pub const Hint = struct {
     label: []const u8,
-    is_dir: bool = false,
+    quoted: bool,
 };
 
 pub const Result = struct {
@@ -18,10 +24,45 @@ pub const Result = struct {
     candidates: []const Candidate,
 };
 
+const Words = struct {
+    items: [16][]const u8 = undefined,
+    len: usize = 0,
+    total: usize = 0,
+    last: []const u8 = "",
+
+    fn push(self: *Words, word: []const u8) void {
+        if (self.len < self.items.len) {
+            self.items[self.len] = word;
+            self.len += 1;
+        }
+        self.total += 1;
+        self.last = word;
+    }
+
+    fn reset(self: *Words) void {
+        self.len = 0;
+        self.total = 0;
+        self.last = "";
+    }
+
+    fn sub(self: *const Words) []const u8 {
+        if (self.len < 2 or self.items[1].len == 0 or self.items[1][0] == '-') return "";
+        return self.items[1];
+    }
+};
+
+const Lists = struct {
+    starts: std.ArrayList(Candidate),
+    contains: std.ArrayList(Candidate),
+};
+
+const string_hints = [_][]const u8{ "msg", "message", "string", "text", "comment", "subject", "title", "description", "pattern", "regex", "expr", "expression", "str" };
+
 const Context = struct {
     start: usize,
     word: []const u8,
     expect_command: bool,
+    words: Words,
 };
 
 pub fn complete(arena: std.mem.Allocator, line: []const u8, cursor: usize) !?Result {
@@ -29,27 +70,57 @@ pub fn complete(arena: std.mem.Allocator, line: []const u8, cursor: usize) !?Res
     if (std.mem.indexOfAny(u8, context.word, "'\"$`") != null) return null;
     const plain = try unescape(arena, context.word);
 
-    var list = std.ArrayList(Candidate).init(arena);
+    var lists = Lists{ .starts = .init(arena), .contains = .init(arena) };
     const command_like = context.expect_command and std.mem.indexOfScalar(u8, plain, '/') == null and !std.mem.startsWith(u8, plain, "~");
     if (command_like) {
         if (plain.len == 0) return null;
-        try collectCommands(arena, plain, &list);
-    } else {
-        try collectFiles(arena, plain, &list);
+        try collectCommands(arena, plain, &lists);
+    } else if (!try collectArguments(arena, context, plain, &lists)) {
+        try collectFiles(arena, plain, &lists.starts);
     }
 
-    std.mem.sort(Candidate, list.items, {}, lessThan);
-    var unique: usize = 0;
-    for (list.items) |candidate| {
-        if (unique > 0 and std.mem.eql(u8, list.items[unique - 1].text, candidate.text)) continue;
-        list.items[unique] = candidate;
-        unique += 1;
-    }
+    const starts = uniqueCandidates(lists.starts.items);
+    const contains = uniqueCandidates(lists.contains.items);
+    var all = std.ArrayList(Candidate).init(arena);
+    try all.appendSlice(starts);
+    try all.appendSlice(contains);
     return .{
         .start = context.start,
         .typed = try escape(arena, plain, true),
-        .candidates = list.items[0..unique],
+        .candidates = all.items,
     };
+}
+
+pub fn hint(line: []const u8, cursor: usize) ?Hint {
+    const context = analyze(line[0..cursor]) orelse return null;
+    const words = context.words;
+    if (words.len == 0 or context.expect_command) return null;
+    const option = if (context.word.len == 0) words.last else if (std.mem.endsWith(u8, context.word, "=")) context.word else return null;
+    if (option.len < 2 or option[0] != '-') return null;
+    const found = spec.find(baseName(words.items[0]), words.sub(), option) orelse return null;
+    const label = std.mem.trim(u8, found.hint, "<>");
+    if (label.len == 0) return null;
+    var quoted = false;
+    for (string_hints) |name| {
+        if (std.ascii.eqlIgnoreCase(name, label)) quoted = true;
+    }
+    return .{ .label = label, .quoted = quoted };
+}
+
+fn uniqueCandidates(items: []Candidate) []Candidate {
+    std.mem.sort(Candidate, items, {}, lessThan);
+    var unique: usize = 0;
+    for (items) |candidate| {
+        if (unique > 0 and std.mem.eql(u8, items[unique - 1].text, candidate.text)) continue;
+        items[unique] = candidate;
+        unique += 1;
+    }
+    return items[0..unique];
+}
+
+fn baseName(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[slash + 1 ..];
 }
 
 fn analyze(prefix: []const u8) ?Context {
@@ -58,6 +129,7 @@ fn analyze(prefix: []const u8) ?Context {
     var in_word = false;
     var word_start: usize = 0;
     var quote: u8 = 0;
+    var words = Words{};
     var i: usize = 0;
     while (i < prefix.len) : (i += 1) {
         const c = prefix[i];
@@ -72,13 +144,21 @@ fn analyze(prefix: []const u8) ?Context {
         switch (c) {
             ' ', '\t', '\n', '|', '&', ';', '<', '>', '(', ')' => {
                 if (in_word) {
-                    finishWord(prefix[word_start..i], c, &expect_command, &after_redirect);
+                    finishWord(prefix[word_start..i], c, &expect_command, &after_redirect, &words);
                     in_word = false;
                 }
                 switch (c) {
-                    '|', ';', '(', '\n' => expect_command = true,
+                    '|', ';', '(', '\n' => {
+                        expect_command = true;
+                        words.reset();
+                    },
                     '&' => {
-                        if (i + 1 < prefix.len and prefix[i + 1] == '>') after_redirect = true else expect_command = true;
+                        if (i + 1 < prefix.len and prefix[i + 1] == '>') {
+                            after_redirect = true;
+                        } else {
+                            expect_command = true;
+                            words.reset();
+                        }
                     },
                     '<', '>' => after_redirect = true,
                     ')' => expect_command = false,
@@ -103,42 +183,59 @@ fn analyze(prefix: []const u8) ?Context {
         .start = if (in_word) word_start else prefix.len,
         .word = if (in_word) prefix[word_start..] else "",
         .expect_command = expect_command and !after_redirect,
+        .words = words,
     };
 }
 
-fn finishWord(word: []const u8, operator: u8, expect_command: *bool, after_redirect: *bool) void {
+fn finishWord(word: []const u8, operator: u8, expect_command: *bool, after_redirect: *bool, words: *Words) void {
     if ((operator == '<' or operator == '>') and !after_redirect.* and isDigits(word)) return;
     if (after_redirect.*) {
         after_redirect.* = false;
         return;
     }
-    if (!expect_command.*) return;
+    if (!expect_command.*) {
+        words.push(word);
+        return;
+    }
     if (isOneOf(&command_keywords, word) or isAssignment(word)) return;
     expect_command.* = false;
+    words.push(word);
 }
 
-fn collectCommands(arena: std.mem.Allocator, prefix: []const u8, list: *std.ArrayList(Candidate)) !void {
-    for (keywords) |keyword| try addName(arena, prefix, keyword, list);
-    for (commands.builtins) |builtin| try addName(arena, prefix, builtin, list);
-    for (try functions.names(arena)) |name| try addName(arena, prefix, name, list);
+fn collectCommands(arena: std.mem.Allocator, prefix: []const u8, lists: *Lists) !void {
+    for (keywords) |keyword| try offer(arena, lists, prefix, keyword, " ");
+    for (commands.builtins) |builtin| try offer(arena, lists, prefix, builtin, " ");
+    for (try functions.names(arena)) |name| try offer(arena, lists, prefix, name, " ");
+    for (spec.commandNames()) |name| try offer(arena, lists, prefix, name, " ");
+}
 
-    const path = vars.get("PATH") orelse return;
-    var dirs = std.mem.splitScalar(u8, path, ':');
-    while (dirs.next()) |dir_path| {
-        var dir = std.fs.cwd().openDir(if (dir_path.len == 0) "." else dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
-        var it = dir.iterate();
-        while (it.next() catch null) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            try addName(arena, prefix, entry.name, list);
+fn collectArguments(arena: std.mem.Allocator, context: Context, plain: []const u8, lists: *Lists) !bool {
+    const words = context.words;
+    if (words.len == 0 or context.expect_command) return false;
+    const command = baseName(words.items[0]);
+    if (plain.len > 0 and plain[0] == '-') {
+        for (spec.options(command, words.sub())) |option| {
+            const suffix: []const u8 = if (std.mem.endsWith(u8, option.text, "=")) "" else " ";
+            try offer(arena, lists, plain, option.text, suffix);
         }
+    } else if (words.total == 1 and (plain.len == 0 or std.mem.indexOfAny(u8, plain[0..1], "/.~") == null)) {
+        const starts_before = lists.starts.items.len;
+        const contains_before = lists.contains.items.len;
+        for (spec.subcommands(command)) |name| try offer(arena, lists, plain, name, " ");
+        for (lists.starts.items[starts_before..]) |*candidate| candidate.rank = spec.popularity(command, candidate.text);
+        for (lists.contains.items[contains_before..]) |*candidate| candidate.rank = spec.popularity(command, candidate.text);
     }
+    return lists.starts.items.len + lists.contains.items.len > 0;
 }
 
-fn addName(arena: std.mem.Allocator, prefix: []const u8, name: []const u8, list: *std.ArrayList(Candidate)) !void {
-    if (!std.mem.startsWith(u8, name, prefix)) return;
-    const text = try escape(arena, name, false);
-    try list.append(.{ .text = text, .label = text });
+fn offer(arena: std.mem.Allocator, lists: *Lists, typed: []const u8, name: []const u8, suffix: []const u8) !void {
+    const bucket = if (std.mem.startsWith(u8, name, typed))
+        &lists.starts
+    else if (typed.len >= 2 and std.mem.indexOf(u8, name, typed) != null)
+        &lists.contains
+    else
+        return;
+    try bucket.append(.{ .text = try escape(arena, name, false), .suffix = suffix });
 }
 
 fn collectFiles(arena: std.mem.Allocator, plain: []const u8, list: *std.ArrayList(Candidate)) !void {
@@ -164,11 +261,10 @@ fn collectFiles(arena: std.mem.Allocator, plain: []const u8, list: *std.ArrayLis
             if (dir.statFile(entry.name)) |stat| is_dir = stat.kind == .directory else |_| {}
         }
         const name = try escape(arena, entry.name, false);
-        const suffix: []const u8 = if (is_dir) "/" else "";
+        const trailing: []const u8 = if (is_dir) "/" else "";
         try list.append(.{
-            .text = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ escaped_dir, name, suffix }),
-            .label = try std.fmt.allocPrint(arena, "{s}{s}", .{ try arena.dupe(u8, entry.name), suffix }),
-            .is_dir = is_dir,
+            .text = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ escaped_dir, name, trailing }),
+            .suffix = if (is_dir) "" else " ",
         });
     }
 }
@@ -195,6 +291,7 @@ fn escape(arena: std.mem.Allocator, text: []const u8, keep_tilde: bool) ![]const
 }
 
 fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+    if (a.rank != b.rank) return a.rank < b.rank;
     return std.mem.lessThan(u8, a.text, b.text);
 }
 

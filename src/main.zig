@@ -6,6 +6,7 @@ const history = @import("history.zig");
 const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
 const rc = @import("rc.zig");
+const spec = @import("spec.zig");
 const vars = @import("vars.zig");
 
 fn nextContinuationLine(context: *anyopaque, arena: std.mem.Allocator) ?[]const u8 {
@@ -41,6 +42,8 @@ pub fn main() !u8 {
     defer prompt.deinit();
     history.init(allocator);
     defer history.deinit();
+    spec.init(allocator);
+    defer spec.deinit();
 
     const stderr = std.io.getStdErr().writer();
     const stdout = std.io.getStdOut().writer();

@@ -3,7 +3,15 @@ const posix = std.posix;
 const completion = @import("complete.zig");
 const highlight = @import("highlight.zig");
 const history = @import("history.zig");
+const spec = @import("spec.zig");
 const unicode = @import("unicode.zig");
+
+const Cycle = struct {
+    items: [][]u8,
+    start: usize,
+    len: usize,
+    index: usize,
+};
 
 const Position = struct {
     row: usize = 0,
@@ -19,17 +27,27 @@ pub const Editor = struct {
     cursor_row: usize = 0,
     marks: bool = false,
     prompt: []const u8,
+    cycle: ?Cycle = null,
+    cycle_keep: bool = false,
+    ghost_text: std.ArrayList(u8),
+    ghost_insert: std.ArrayList(u8),
+    ghost_back: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, prompt: []const u8) Editor {
         return .{
             .allocator = allocator,
             .buffer = .init(allocator),
             .prompt = prompt,
+            .ghost_text = .init(allocator),
+            .ghost_insert = .init(allocator),
         };
     }
 
     pub fn deinit(self: *Editor) void {
         self.buffer.deinit();
+        self.ghost_text.deinit();
+        self.ghost_insert.deinit();
+        self.clearCycle();
         self.clearDraft();
     }
 
@@ -44,6 +62,7 @@ pub const Editor = struct {
         self.cursor_row = 0;
         self.history_pos = history.entries.items.len;
         self.clearDraft();
+        self.clearCycle();
 
         const original = posix.tcgetattr(posix.STDIN_FILENO) catch |err| switch (err) {
             error.NotATerminal => return self.readPlain(),
@@ -92,6 +111,7 @@ pub const Editor = struct {
                 },
                 else => return err,
             };
+            self.cycle_keep = false;
             switch (byte) {
                 '\r', '\n' => {
                     try self.finishLine();
@@ -114,7 +134,7 @@ pub const Editor = struct {
                     try self.deleteForward();
                 },
                 1 => self.cursor = 0,
-                9 => try self.complete(),
+                9 => try self.cycleComplete(true),
                 12 => {
                     try stdout.writeAll("\x1b[H\x1b[2J");
                     self.cursor_row = 0;
@@ -133,39 +153,107 @@ pub const Editor = struct {
                 0xc0...0xff => try self.insertUtf8(byte),
                 else => {},
             }
+            if (!self.cycle_keep) self.clearCycle();
             try self.redraw();
         }
     }
 
-    fn complete(self: *Editor) !void {
+    fn cycleComplete(self: *Editor, forward: bool) !void {
+        self.cycle_keep = true;
+        if (self.cycle == null) {
+            spec.invalidate();
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const result = (try completion.complete(arena.allocator(), self.buffer.items, self.cursor)) orelse return;
+            const candidates = result.candidates;
+            if (candidates.len == 0) return;
+
+            const items = try self.allocator.alloc([]u8, candidates.len + 1);
+            var made: usize = 0;
+            errdefer {
+                for (items[0..made]) |item| self.allocator.free(item);
+                self.allocator.free(items);
+            }
+            for (candidates, 0..) |candidate, index| {
+                items[index] = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ candidate.text, candidate.suffix });
+                made += 1;
+            }
+            items[candidates.len] = try self.allocator.dupe(u8, self.buffer.items[result.start..self.cursor]);
+            self.cycle = .{
+                .items = items,
+                .start = result.start,
+                .len = self.cursor - result.start,
+                .index = if (forward) 0 else candidates.len - 1,
+            };
+            self.applyCycle();
+            if (candidates.len == 1) {
+                self.clearCycle();
+                self.cycle_keep = false;
+            }
+            return;
+        }
+        const cycle = &self.cycle.?;
+        const total = cycle.items.len;
+        cycle.index = if (forward) (cycle.index + 1) % total else (cycle.index + total - 1) % total;
+        self.applyCycle();
+    }
+
+    fn applyCycle(self: *Editor) void {
+        const cycle = &self.cycle.?;
+        const text = cycle.items[cycle.index];
+        self.buffer.replaceRange(cycle.start, cycle.len, text) catch return;
+        cycle.len = text.len;
+        self.cursor = cycle.start + text.len;
+    }
+
+    fn clearCycle(self: *Editor) void {
+        const cycle = self.cycle orelse return;
+        for (cycle.items) |item| self.allocator.free(item);
+        self.allocator.free(cycle.items);
+        self.cycle = null;
+    }
+
+    fn refreshGhost(self: *Editor) !void {
+        self.ghost_text.clearRetainingCapacity();
+        self.ghost_insert.clearRetainingCapacity();
+        self.ghost_back = 0;
+        const typed = self.buffer.items;
+        if (self.cycle != null or typed.len == 0 or self.cursor != typed.len or self.history_pos != history.entries.items.len) return;
+
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const result = (try completion.complete(arena.allocator(), self.buffer.items, self.cursor)) orelse return;
-        const candidates = result.candidates;
-        if (candidates.len == 0) return;
+        if (try completion.complete(arena.allocator(), typed, self.cursor)) |result| {
+            if (try self.completionGhost(result)) return;
+        }
+        if (completion.hint(typed, self.cursor)) |hint| {
+            if (hint.quoted) {
+                try self.ghost_text.writer().print("\"{s}\"", .{hint.label});
+                try self.ghost_insert.appendSlice("\"\"");
+                self.ghost_back = 1;
+            } else {
+                try self.ghost_text.writer().print("<{s}>", .{hint.label});
+            }
+            return;
+        }
+        if (self.suggestion()) |rest| {
+            try self.ghost_text.appendSlice(rest);
+            try self.ghost_insert.appendSlice(rest);
+        }
+    }
 
-        var common = candidates[0].text;
-        for (candidates[1..]) |candidate| {
-            var len: usize = 0;
-            while (len < common.len and len < candidate.text.len and common[len] == candidate.text[len]) len += 1;
-            common = common[0..len];
+    fn completionGhost(self: *Editor, result: completion.Result) !bool {
+        if (result.typed.len == 0) return false;
+        var first: ?completion.Candidate = null;
+        for (result.candidates) |candidate| {
+            if (std.mem.eql(u8, candidate.text, result.typed)) return false;
+            if (first == null and candidate.text.len > result.typed.len and std.mem.startsWith(u8, candidate.text, result.typed)) first = candidate;
         }
-        while (common.len > 0 and common.len < candidates[0].text.len and (candidates[0].text[common.len] & 0xc0) == 0x80) {
-            common = common[0 .. common.len - 1];
-        }
-        var slashes: usize = 0;
-        while (slashes < common.len and common[common.len - 1 - slashes] == '\\') slashes += 1;
-        if (slashes % 2 == 1) common = common[0 .. common.len - 1];
-
-        if (candidates.len == 1) {
-            const suffix: []const u8 = if (candidates[0].is_dir) "" else " ";
-            const text = try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ candidates[0].text, suffix });
-            try self.replaceWord(result.start, text);
-        } else if (common.len > result.typed.len) {
-            try self.replaceWord(result.start, common);
-        } else {
-            try self.listCandidates(candidates);
-        }
+        const chosen = first orelse return false;
+        const rest = chosen.text[result.typed.len..];
+        try self.ghost_text.appendSlice(rest);
+        try self.ghost_insert.appendSlice(rest);
+        try self.ghost_insert.appendSlice(chosen.suffix);
+        return true;
     }
 
     fn suggestion(self: *const Editor) ?[]const u8 {
@@ -183,9 +271,31 @@ pub const Editor = struct {
     }
 
     fn acceptSuggestion(self: *Editor) !void {
-        const text = self.suggestion() orelse return;
-        try self.buffer.appendSlice(text);
-        self.cursor = self.buffer.items.len;
+        if (self.ghost_insert.items.len == 0) return;
+        try self.buffer.appendSlice(self.ghost_insert.items);
+        self.cursor = self.buffer.items.len - self.ghost_back;
+    }
+
+    fn acceptSuggestionWord(self: *Editor) !void {
+        const pending = self.ghost_insert.items;
+        if (pending.len == 0) return;
+        var end = wordRight(pending, 0);
+        if (end == 0 or self.ghost_back > 0) end = pending.len;
+        try self.buffer.appendSlice(pending[0..end]);
+        self.cursor = self.buffer.items.len - if (end == pending.len) self.ghost_back else 0;
+    }
+
+    fn moveWordRight(self: *Editor) !void {
+        if (self.cursor >= self.buffer.items.len) return self.acceptSuggestionWord();
+        self.cursor = wordRight(self.buffer.items, self.cursor);
+    }
+
+    fn deleteWordBackwardStop(self: *Editor) !void {
+        try self.deleteRange(wordLeft(self.buffer.items, self.cursor), self.cursor);
+    }
+
+    fn deleteWordForward(self: *Editor) !void {
+        try self.deleteRange(self.cursor, wordRight(self.buffer.items, self.cursor));
     }
 
     fn cursorRight(self: *Editor) !void {
@@ -196,43 +306,6 @@ pub const Editor = struct {
     fn cursorEnd(self: *Editor) !void {
         if (self.cursor == self.buffer.items.len) return self.acceptSuggestion();
         self.cursor = self.buffer.items.len;
-    }
-
-    fn replaceWord(self: *Editor, start: usize, text: []const u8) !void {
-        try self.buffer.replaceRange(start, self.cursor - start, text);
-        self.cursor = start + text.len;
-    }
-
-    fn listCandidates(self: *Editor, candidates: []const completion.Candidate) !void {
-        const stdout = std.io.getStdOut().writer();
-        const cols = terminalColumns();
-        const saved = self.cursor;
-        self.cursor = self.buffer.items.len;
-        try self.draw(false);
-        self.cursor = saved;
-        try stdout.writeAll("\r\n");
-
-        var widest: usize = 0;
-        for (candidates) |candidate| widest = @max(widest, displayWidth(candidate.label));
-        const cell = widest + 2;
-        const per_row = @max(1, cols / cell);
-        const rows = (candidates.len + per_row - 1) / per_row;
-        var bw = std.io.bufferedWriter(stdout);
-        const w = bw.writer();
-        for (0..rows) |row| {
-            for (0..per_row) |column| {
-                const index = column * rows + row;
-                if (index >= candidates.len) break;
-                const label = candidates[index].label;
-                try w.writeAll(label);
-                if (index + rows < candidates.len) {
-                    for (0..cell - displayWidth(label)) |_| try w.writeByte(' ');
-                }
-            }
-            try w.writeAll("\r\n");
-        }
-        try bw.flush();
-        self.cursor_row = 0;
     }
 
     fn clearDraft(self: *Editor) void {
@@ -313,7 +386,16 @@ pub const Editor = struct {
             }
             return;
         }
-        if (intro != '[') return;
+        if (intro != '[') {
+            switch (intro) {
+                127, 8 => try self.deleteWordBackwardStop(),
+                'b' => self.cursor = wordLeft(self.buffer.items, self.cursor),
+                'f' => try self.moveWordRight(),
+                'd' => try self.deleteWordForward(),
+                else => {},
+            }
+            return;
+        }
 
         var params: [8]u8 = undefined;
         var params_len: usize = 0;
@@ -326,17 +408,21 @@ pub const Editor = struct {
             }
         };
         const param = params[0..params_len];
+        const by_word = std.mem.endsWith(u8, param, ";3") or std.mem.endsWith(u8, param, ";5") or std.mem.endsWith(u8, param, ";7");
 
         switch (final) {
             'A' => try self.historyPrevious(),
             'B' => try self.historyNext(),
-            'C' => try self.cursorRight(),
-            'D' => self.cursor = prevBoundary(self.buffer.items, self.cursor),
+            'C' => if (by_word) try self.moveWordRight() else try self.cursorRight(),
+            'D' => self.cursor = if (by_word) wordLeft(self.buffer.items, self.cursor) else prevBoundary(self.buffer.items, self.cursor),
+            'Z' => try self.cycleComplete(false),
             'H' => self.cursor = 0,
             'F' => try self.cursorEnd(),
             '~' => {
                 if (std.mem.eql(u8, param, "3")) {
                     try self.deleteForward();
+                } else if (std.mem.eql(u8, param, "3;3") or std.mem.eql(u8, param, "3;5")) {
+                    try self.deleteWordForward();
                 } else if (std.mem.eql(u8, param, "1") or std.mem.eql(u8, param, "7")) {
                     self.cursor = 0;
                 } else if (std.mem.eql(u8, param, "4") or std.mem.eql(u8, param, "8")) {
@@ -353,12 +439,13 @@ pub const Editor = struct {
     }
 
     fn redraw(self: *Editor) !void {
+        try self.refreshGhost();
         try self.draw(true);
     }
 
     fn draw(self: *Editor, ghost: bool) !void {
         const cols = terminalColumns();
-        const hint: []const u8 = if (ghost) self.suggestion() orelse "" else "";
+        const hint: []const u8 = if (ghost) self.ghost_text.items else "";
         var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
         const w = bw.writer();
 
@@ -423,17 +510,29 @@ fn advance(pos: *Position, text: []const u8, cols: usize) void {
     }
 }
 
-fn displayWidth(text: []const u8) usize {
-    var pos = Position{};
-    advance(&pos, text, std.math.maxInt(usize));
-    return pos.col;
-}
-
 fn terminalColumns() usize {
     var ws: posix.winsize = undefined;
     const rc = posix.system.ioctl(posix.STDOUT_FILENO, posix.T.IOCGWINSZ, @intFromPtr(&ws));
     if (posix.errno(rc) != .SUCCESS or ws.col < 2) return 80;
     return ws.col;
+}
+
+fn isWordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+}
+
+fn wordLeft(items: []const u8, pos: usize) usize {
+    var i = pos;
+    while (i > 0 and !isWordByte(items[i - 1])) i -= 1;
+    while (i > 0 and isWordByte(items[i - 1])) i -= 1;
+    return i;
+}
+
+fn wordRight(items: []const u8, pos: usize) usize {
+    var i = pos;
+    while (i < items.len and !isWordByte(items[i])) i += 1;
+    while (i < items.len and isWordByte(items[i])) i += 1;
+    return i;
 }
 
 fn prevBoundary(items: []const u8, pos: usize) usize {
