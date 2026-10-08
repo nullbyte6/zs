@@ -23,3 +23,4 @@
 - Add input and output redirection with <, >, >>, N> and N>&M
 - Add bright cyan highlighting for operators, redirections, wildcards and symbol arguments
 - Add here-documents with <<, <<- and quoted delimiters
+- Add &> and &>> to redirect both stdout and stderr

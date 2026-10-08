@@ -22,7 +22,7 @@ pub fn render(writer: anytype, line: []const u8) !void {
             var end = i;
             while (end < line.len and isOperator(line[end])) end += 1;
             for (line[i..end], i..) |op, index| {
-                if (op == '<' or op == '>') {
+                if (op == '<' or op == '>' or (op == '&' and index + 1 < line.len and line[index + 1] == '>')) {
                     after_redirect = true;
                 } else if (!(op == '&' and index > 0 and line[index - 1] == '>')) {
                     expect_command = true;

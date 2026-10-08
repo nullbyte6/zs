@@ -10,6 +10,7 @@ pub const Redirect = struct {
     kind: RedirectKind,
     target: []const u8 = "",
     strip_tabs: bool = false,
+    both: bool = false,
 };
 
 pub const LineSource = struct {
@@ -142,9 +143,13 @@ pub const Parser = struct {
                     return try self.endPipeline(.always);
                 },
                 '&' => {
-                    if (!self.peek('&')) return error.UnsupportedOperator;
-                    self.pos += 2;
-                    return try self.endPipeline(.and_if);
+                    if (self.peek('>')) {
+                        try self.redirect();
+                    } else {
+                        if (!self.peek('&')) return error.UnsupportedOperator;
+                        self.pos += 2;
+                        return try self.endPipeline(.and_if);
+                    }
                 },
                 '<', '>' => try self.redirect(),
                 '~' => {
@@ -209,6 +214,7 @@ pub const Parser = struct {
             self.pattern.clearRetainingCapacity();
             done.target = if (done.kind == .heredoc) try self.readHeredoc(text, done.strip_tabs, quoted_word) else text;
             try self.redirects.append(done);
+            if (done.both) try self.redirects.append(.{ .fd = 2, .kind = .dup, .target = "1" });
             self.pending_redirect = null;
             self.has_glob = false;
             self.in_word = false;
@@ -267,6 +273,18 @@ pub const Parser = struct {
     fn redirect(self: *Parser) Error!void {
         const line = self.line;
         const op = line[self.pos];
+        if (op == '&') {
+            try self.flushWord();
+            if (self.pending_redirect != null) return error.MissingTarget;
+            self.pos += 2;
+            var both_kind: RedirectKind = .write;
+            if (self.pos < line.len and line[self.pos] == '>') {
+                both_kind = .append;
+                self.pos += 1;
+            }
+            self.pending_redirect = .{ .fd = 1, .kind = both_kind, .both = true };
+            return;
+        }
         var fd: u8 = if (op == '<') 0 else 1;
         if (self.in_word and self.plain and self.assign_name == null and self.pending_redirect == null and isDigits(self.word.items)) {
             fd = std.fmt.parseInt(u8, self.word.items, 10) catch return error.UnsupportedOperator;
