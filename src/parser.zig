@@ -13,6 +13,12 @@ pub const Redirect = struct {
     both: bool = false,
 };
 
+pub const Substituter = struct {
+    context: *anyopaque,
+    run: *const fn (context: *anyopaque, arena: std.mem.Allocator, command: []const u8) Error![]const u8,
+    status: *u8,
+};
+
 pub const LineSource = struct {
     context: *anyopaque,
     next: *const fn (context: *anyopaque, arena: std.mem.Allocator) ?[]const u8,
@@ -36,6 +42,7 @@ pub const Error = error{
     UnsupportedOperator,
     MissingCommand,
     MissingTarget,
+    SubstitutionFailed,
     BadSubstitution,
     OutOfMemory,
 };
@@ -45,6 +52,7 @@ pub fn message(err: anyerror) ?[]const u8 {
         error.UnterminatedQuote => "syntax error: unterminated quote",
         error.UnsupportedOperator => "syntax error: unsupported operator",
         error.MissingTarget => "syntax error: missing redirection target",
+        error.SubstitutionFailed => "command substitution failed",
         error.MissingCommand => "syntax error: missing command",
         error.BadSubstitution => "syntax error: bad substitution",
         error.OutOfMemory => "out of memory",
@@ -73,6 +81,7 @@ pub const Parser = struct {
     pending_redirect: ?Redirect = null,
     word_quoted: bool = false,
     lines: ?LineSource = null,
+    substitute: ?Substituter = null,
     words: std.ArrayList([]const u8),
     commands: std.ArrayList(Command),
     pending_join: Join = .always,
@@ -129,6 +138,10 @@ pub const Parser = struct {
                 '$' => {
                     self.plain = false;
                     try self.expandVariable(false);
+                },
+                '`' => {
+                    self.plain = false;
+                    try self.expandBacktick(false);
                 },
                 '|' => {
                     if (self.peek('|')) {
@@ -339,6 +352,10 @@ pub const Parser = struct {
                 try self.expandVariable(true);
                 continue;
             }
+            if (c == '`') {
+                try self.expandBacktick(true);
+                continue;
+            }
             if (c == '\\' and self.pos + 1 < line.len and std.mem.indexOfScalar(u8, "\"\\$`", line[self.pos + 1]) != null) {
                 try self.appendLiteral(line[self.pos + 1]);
                 self.pos += 2;
@@ -358,11 +375,21 @@ pub const Parser = struct {
             return;
         };
         self.pos = expansion.end;
+        try self.appendExpansion(expansion.value, quoted);
+    }
+
+    fn expandBacktick(self: *Parser, quoted: bool) Error!void {
+        const expansion = try self.backtick(self.line, self.pos);
+        self.pos = expansion.end;
+        try self.appendExpansion(expansion.value, quoted);
+    }
+
+    fn appendExpansion(self: *Parser, value: []const u8, quoted: bool) Error!void {
         if (quoted or self.assign_name != null or self.pending_redirect != null) {
-            try self.appendLiteralSlice(expansion.value);
+            try self.appendLiteralSlice(value);
             return;
         }
-        for (expansion.value) |b| {
+        for (value) |b| {
             if (b == ' ' or b == '\t' or b == '\n') {
                 try self.flushWord();
             } else {
@@ -372,8 +399,29 @@ pub const Parser = struct {
         }
     }
 
+    fn substituteCommand(self: *Parser, command: []const u8) Error![]const u8 {
+        const substituter = self.substitute orelse return error.UnsupportedOperator;
+        const output = try substituter.run(substituter.context, self.arena, command);
+        self.last_status = substituter.status.*;
+        return output;
+    }
+
+    fn backtick(self: *Parser, text: []const u8, start: usize) Error!Expansion {
+        var i = start + 1;
+        while (i < text.len and text[i] != '`') {
+            i += if (text[i] == '\\' and i + 1 < text.len) 2 else 1;
+        }
+        if (i >= text.len) return error.UnterminatedQuote;
+        return .{ .value = try self.substituteCommand(text[start + 1 .. i]), .end = i + 1 };
+    }
+
     fn dollar(self: *Parser, text: []const u8, start: usize) Error!?Expansion {
         const i = start + 1;
+        if (i < text.len and text[i] == '(') {
+            if (i + 1 < text.len and text[i + 1] == '(') return error.UnsupportedOperator;
+            const close = findParenEnd(text, i) orelse return error.UnterminatedQuote;
+            return .{ .value = try self.substituteCommand(text[i + 1 .. close]), .end = close + 1 };
+        }
         if (i < text.len and text[i] == '?') {
             return .{ .value = try std.fmt.allocPrint(self.arena, "{d}", .{self.last_status}), .end = i + 1 };
         }
@@ -410,6 +458,10 @@ pub const Parser = struct {
             if (c == '\\' and i + 1 < text.len and std.mem.indexOfScalar(u8, "$`\\", text[i + 1]) != null) {
                 try out.append(text[i + 1]);
                 i += 2;
+            } else if (c == '`') {
+                const expansion = try self.backtick(text, i);
+                try out.appendSlice(expansion.value);
+                i = expansion.end;
             } else if (c == '$') {
                 if (try self.dollar(text, i)) |expansion| {
                     try out.appendSlice(expansion.value);
@@ -429,6 +481,28 @@ pub const Parser = struct {
 
 fn isNameChar(c: u8, first: bool) bool {
     return c == '_' or std.ascii.isAlphabetic(c) or (!first and std.ascii.isDigit(c));
+}
+
+pub fn findParenEnd(text: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '\\' => i += 1,
+            '\'' => i = std.mem.indexOfScalarPos(u8, text, i + 1, '\'') orelse return null,
+            '"' => {
+                i += 1;
+                while (i < text.len and text[i] != '"') i += if (text[i] == '\\') 2 else 1;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn isDigits(text: []const u8) bool {

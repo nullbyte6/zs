@@ -1,5 +1,6 @@
 const std = @import("std");
 const commands = @import("commands.zig");
+const parser = @import("parser.zig");
 
 const reset = "\x1b[0m";
 const command_color = "\x1b[33m";
@@ -93,6 +94,8 @@ fn wordEnd(line: []const u8, start: usize) usize {
     var i = start;
     while (i < line.len and !isSpace(line[i]) and !isOperator(line[i])) {
         switch (line[i]) {
+            '$' => i = if (i + 1 < line.len and line[i + 1] == '(') (if (parser.findParenEnd(line, i + 1)) |close| close + 1 else line.len) else i + 1,
+            '`' => i = if (std.mem.indexOfScalarPos(u8, line, i + 1, '`')) |close| close + 1 else line.len,
             '\'', '"' => i = quoteEnd(line, i),
             '\\' => i += if (i + 1 < line.len) 2 else 1,
             else => i += 1,

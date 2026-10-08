@@ -30,10 +30,12 @@ fn restoreDefaultSignals() void {
 
 pub const Shell = struct {
     last_status: u8 = 0,
+    substitution_status: u8 = 0,
 
     pub fn run(self: *Shell, arena: std.mem.Allocator, line: []const u8, lines: ?parser.LineSource) anyerror!?u8 {
         var p = parser.Parser.init(arena, line);
         p.lines = lines;
+        p.substitute = .{ .context = self, .run = captureOutput, .status = &self.substitution_status };
         while (try p.next(self.last_status)) |pipeline| {
             const should_run = switch (pipeline.join) {
                 .always => true,
@@ -128,6 +130,36 @@ pub const Shell = struct {
         return null;
     }
 };
+
+fn captureOutput(context: *anyopaque, arena: std.mem.Allocator, command: []const u8) parser.Error![]const u8 {
+    const self: *Shell = @ptrCast(@alignCast(context));
+    const fds = posix.pipe() catch return error.SubstitutionFailed;
+    const pid = posix.fork() catch {
+        posix.close(fds[0]);
+        posix.close(fds[1]);
+        return error.SubstitutionFailed;
+    };
+    if (pid == 0) {
+        restoreDefaultSignals();
+        posix.close(fds[0]);
+        posix.dup2(fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
+        posix.close(fds[1]);
+        const code = self.run(arena, command, null) catch posix.exit(1);
+        posix.exit(code orelse self.last_status);
+    }
+    posix.close(fds[1]);
+    var output = std.ArrayList(u8).init(arena);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = posix.read(fds[0], &buf) catch break;
+        if (n == 0) break;
+        try output.appendSlice(buf[0..n]);
+    }
+    posix.close(fds[0]);
+    var interrupted = false;
+    self.substitution_status = reap(pid, &interrupted);
+    return std.mem.trimRight(u8, output.items, "\n");
+}
 
 fn isBuiltin(name: []const u8) bool {
     for (commands.builtins) |builtin_name| {
