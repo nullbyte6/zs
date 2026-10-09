@@ -1,4 +1,5 @@
 const std = @import("std");
+const sys = @import("sys.zig");
 const vars = @import("vars.zig");
 
 pub const Option = struct {
@@ -66,15 +67,15 @@ pub fn commandNames() []const []const u8 {
 }
 
 fn scanPath(arena: std.mem.Allocator, path: []const u8) ![]const []const u8 {
-    var list = std.ArrayList([]const u8).init(arena);
+    var list: std.ArrayList([]const u8) = .empty;
     var dirs = std.mem.splitScalar(u8, path, ':');
     while (dirs.next()) |dir_path| {
-        var dir = std.fs.cwd().openDir(if (dir_path.len == 0) "." else dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = sys.cwd().openDir(sys.io, if (dir_path.len == 0) "." else dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(sys.io);
         var it = dir.iterate();
-        while (it.next() catch null) |entry| {
+        while (it.next(sys.io) catch null) |entry| {
             if (entry.kind != .file and entry.kind != .sym_link) continue;
-            try list.append(try arena.dupe(u8, entry.name));
+            try list.append(arena, try arena.dupe(u8, entry.name));
         }
     }
     return uniqueSorted([]const u8, list.items, {}, lessName, eqlName);
@@ -140,17 +141,17 @@ fn discoverSubcommands(arena: std.mem.Allocator, command: []const u8) ![]const [
         if (std.mem.eql(u8, entry.command, command)) return entry.subcommands;
     }
     const prefix = try std.fmt.allocPrint(arena, "{s}-", .{command});
-    var list = std.ArrayList([]const u8).init(arena);
+    var list: std.ArrayList([]const u8) = .empty;
     for (man_roots) |root| for (man_sections) |section| {
         const dir_path = try std.fmt.allocPrint(arena, "{s}/man{s}", .{ root, section });
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = sys.cwd().openDir(sys.io, dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(sys.io);
         var it = dir.iterate();
-        while (it.next() catch null) |entry| {
+        while (it.next(sys.io) catch null) |entry| {
             if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
             const page = pageName(entry.name);
             if (page.len <= prefix.len or hasCommand(page)) continue;
-            try list.append(try arena.dupe(u8, page[prefix.len..]));
+            try list.append(arena, try arena.dupe(u8, page[prefix.len..]));
         }
     };
     const found = uniqueSorted([]const u8, list.items, {}, lessName, eqlName);
@@ -196,8 +197,8 @@ fn loadOptions(arena: std.mem.Allocator, command: []const u8, sub: []const u8) !
 
 fn readPage(scratch: std.mem.Allocator, page: []const u8) ?[]const u8 {
     for (man_roots) |root| {
-        var dir = std.fs.openDirAbsolute(root, .{}) catch continue;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(sys.io, root, .{}) catch continue;
+        defer dir.close(sys.io);
         for (man_sections) |section| for ([_][]const u8{ ".gz", "" }) |extension| {
             const path = std.fmt.allocPrint(scratch, "man{s}/{s}.{s}{s}", .{ section, page, section, extension }) catch return null;
             var text = loadFile(scratch, dir, path) orelse continue;
@@ -212,24 +213,24 @@ fn readPage(scratch: std.mem.Allocator, page: []const u8) ?[]const u8 {
     return null;
 }
 
-fn loadTarget(scratch: std.mem.Allocator, dir: std.fs.Dir, target: []const u8) ?[]const u8 {
+fn loadTarget(scratch: std.mem.Allocator, dir: std.Io.Dir, target: []const u8) ?[]const u8 {
     if (std.mem.indexOf(u8, target, "..") != null or target.len == 0 or target[0] == '/') return null;
     if (loadFile(scratch, dir, target)) |text| return text;
     const zipped = std.fmt.allocPrint(scratch, "{s}.gz", .{target}) catch return null;
     return loadFile(scratch, dir, zipped);
 }
 
-fn loadFile(scratch: std.mem.Allocator, dir: std.fs.Dir, path: []const u8) ?[]const u8 {
-    const raw = dir.readFileAlloc(scratch, path, max_page) catch return null;
+fn loadFile(scratch: std.mem.Allocator, dir: std.Io.Dir, path: []const u8) ?[]const u8 {
+    const raw = dir.readFileAlloc(sys.io, path, scratch, .limited(max_page)) catch return null;
     if (!std.mem.endsWith(u8, path, ".gz")) return raw;
-    var stream = std.io.fixedBufferStream(raw);
-    var out = std.ArrayList(u8).init(scratch);
-    std.compress.gzip.decompress(stream.reader(), out.writer()) catch return null;
-    return out.items;
+    var input: std.Io.Reader = .fixed(raw);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var gzip: std.compress.flate.Decompress = .init(&input, .gzip, &window);
+    return gzip.reader.allocRemaining(scratch, .unlimited) catch null;
 }
 
 fn parseOptions(arena: std.mem.Allocator, text: []const u8) ![]const Option {
-    var list = std.ArrayList(Option).init(arena);
+    var list: std.ArrayList(Option) = .empty;
     var cursor: usize = 0;
     var chain: usize = 0;
     var previous_end: usize = 0;
@@ -259,7 +260,7 @@ fn parseOptions(arena: std.mem.Allocator, text: []const u8) ![]const Option {
         const joined = list.items.len > 0 and marker >= previous_end and std.mem.eql(u8, text[previous_end..marker], ", ");
         if (!joined) chain = list.items.len;
         previous_end = cursor;
-        try list.append(.{ .text = try arena.dupe(u8, option_text), .hint = try arena.dupe(u8, hint) });
+        try list.append(arena, .{ .text = try arena.dupe(u8, option_text), .hint = try arena.dupe(u8, hint) });
         if (hint.len > 0) {
             for (list.items[chain..]) |*earlier| {
                 if (earlier.hint.len == 0 and earlier.text[earlier.text.len - 1] != '=') earlier.hint = list.items[list.items.len - 1].hint;
@@ -275,7 +276,7 @@ fn parseOptions(arena: std.mem.Allocator, text: []const u8) ![]const Option {
         while (tokens.next()) |token| {
             var buf: [64]u8 = undefined;
             const name = optionName(&buf, token) orelse continue;
-            try list.append(.{ .text = try arena.dupe(u8, name) });
+            try list.append(arena, .{ .text = try arena.dupe(u8, name) });
         }
     }
 

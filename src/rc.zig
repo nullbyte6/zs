@@ -3,6 +3,7 @@ const executor = @import("executor.zig");
 const parser = @import("parser.zig");
 const vars = @import("vars.zig");
 const diag = @import("diag.zig");
+const sys = @import("sys.zig");
 
 const Source = struct {
     text: []const u8,
@@ -63,7 +64,7 @@ fn profile(allocator: std.mem.Allocator, shell: *executor.Shell, path: []const u
 }
 
 pub fn runFile(allocator: std.mem.Allocator, shell: *executor.Shell, path: []const u8, label: []const u8) !?u8 {
-    const text = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 20);
+    const text = try sys.cwd().readFileAlloc(sys.io, path, allocator, .limited(1 << 20));
     defer allocator.free(text);
 
     var source = Source{ .text = text };

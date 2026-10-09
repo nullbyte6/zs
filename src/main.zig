@@ -9,6 +9,7 @@ const parser = @import("parser.zig");
 const prompt = @import("prompt.zig");
 const rc = @import("rc.zig");
 const spec = @import("spec.zig");
+const sys = @import("sys.zig");
 const vars = @import("vars.zig");
 
 fn nextContinuationLine(context: *anyopaque, arena: std.mem.Allocator) ?[]const u8 {
@@ -31,12 +32,11 @@ fn renderPrompt(shell: *executor.Shell, arena: std.mem.Allocator, color: bool) [
     return shell.expandText(arena, rendered);
 }
 
-pub fn main() !u8 {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !u8 {
+    sys.io = init.io;
+    const allocator = init.gpa;
 
-    try vars.init(allocator);
+    try vars.init(allocator, init.environ_map);
     defer vars.deinit();
     functions.init(allocator);
     defer functions.deinit();
@@ -49,11 +49,10 @@ pub fn main() !u8 {
     spec.init(allocator);
     defer spec.deinit();
 
-    const stderr = std.io.getStdErr().writer();
-    const stdout = std.io.getStdOut().writer();
+    const stderr = sys.stderr();
+    const stdout = sys.stdout();
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     var command: ?[]const u8 = null;
     var force_interactive = false;
@@ -74,7 +73,7 @@ pub fn main() !u8 {
             'c' => {
                 index += 1;
                 if (index >= argv.len) {
-                    try stderr.writeAll("zs: -c: option requires an argument\n");
+                    try sys.writeAll(stderr, "zs: -c: option requires an argument\n");
                     return 2;
                 }
                 command = argv[index];
@@ -83,13 +82,13 @@ pub fn main() !u8 {
             'l' => login = true,
             's' => {},
             else => {
-                try stderr.print("zs: -{c}: invalid option\n", .{flag});
+                try sys.print(stderr, "zs: -{c}: invalid option\n", .{flag});
                 return 2;
             },
         };
     }
 
-    const interactive = command == null and (force_interactive or std.io.getStdIn().isTty());
+    const interactive = command == null and (force_interactive or sys.isTty(std.Io.File.stdin()));
     if (interactive) executor.ignoreInteractiveSignals();
 
     var shell = executor.Shell{};
@@ -103,7 +102,7 @@ pub fn main() !u8 {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const exit_code = shell.run(arena.allocator(), text, null) catch |err| {
-            try stderr.print("zs: {s}\n", .{parser.message(err) orelse @errorName(err)});
+            try sys.print(stderr, "zs: {s}\n", .{parser.message(err) orelse @errorName(err)});
             return 2;
         };
         return exit_code orelse shell.last_status;
@@ -122,7 +121,7 @@ pub fn main() !u8 {
 
     while (true) {
         if (command_pending) {
-            try stdout.print("\x1b]133;D;{d}\x07", .{shell.last_status});
+            try sys.print(stdout, "\x1b]133;D;{d}\x07", .{shell.last_status});
             command_pending = false;
         }
         var prompt_arena = std.heap.ArenaAllocator.init(allocator);
@@ -138,10 +137,10 @@ pub fn main() !u8 {
 
         if (arith.looksLikeExpression(input)) {
             if (arith.calculate(input)) |value| {
-                try stdout.print("{d}\n", .{value});
+                try sys.print(stdout, "{d}\n", .{value});
                 shell.last_status = 0;
             } else |err| {
-                try stderr.print("zs: {s}\n", .{if (err == error.DivideByZero) "division by zero" else "syntax error in expression"});
+                try sys.print(stderr, "zs: {s}\n", .{if (err == error.DivideByZero) "division by zero" else "syntax error in expression"});
                 shell.last_status = 1;
             }
             continue;
@@ -153,10 +152,10 @@ pub fn main() !u8 {
         const owned_input = try arena.allocator().dupe(u8, input);
         const exit_code = shell.run(arena.allocator(), owned_input, .{ .context = &editor, .next = nextContinuationLine }) catch |err| {
             if (parser.message(err)) |text| {
-                try stderr.print("zs: {s}\n", .{text});
+                try sys.print(stderr, "zs: {s}\n", .{text});
                 shell.last_status = 2;
             } else {
-                try stderr.print("zs: {s}\n", .{@errorName(err)});
+                try sys.print(stderr, "zs: {s}\n", .{@errorName(err)});
                 shell.last_status = 1;
             }
             continue;

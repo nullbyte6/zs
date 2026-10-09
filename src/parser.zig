@@ -117,12 +117,12 @@ pub const Parser = struct {
         return .{
             .arena = arena,
             .line = line,
-            .word = .init(arena),
-            .pattern = .init(arena),
-            .assignments = .init(arena),
-            .redirects = .init(arena),
-            .words = .init(arena),
-            .commands = .init(arena),
+            .word = .empty,
+            .pattern = .empty,
+            .assignments = .empty,
+            .redirects = .empty,
+            .words = .empty,
+            .commands = .empty,
         };
     }
 
@@ -217,8 +217,8 @@ pub const Parser = struct {
                     if (self.assign_name != null or self.pending_redirect != null or self.mode == .text) {
                         try self.appendLiteral(c);
                     } else {
-                        try self.word.append(c);
-                        try self.pattern.append(c);
+                        try self.word.append(self.arena, c);
+                        try self.pattern.append(self.arena, c);
                         self.has_glob = true;
                     }
                     self.plain = false;
@@ -257,25 +257,25 @@ pub const Parser = struct {
         self.word_quoted = false;
         if (self.pending_redirect) |pending| {
             var done = pending;
-            const text = try self.word.toOwnedSlice();
+            const text = try self.word.toOwnedSlice(self.arena);
             self.pattern.clearRetainingCapacity();
             done.target = if (done.kind == .heredoc) try self.readHeredoc(text, done.strip_tabs, quoted_word) else text;
-            try self.redirects.append(done);
-            if (done.both) try self.redirects.append(.{ .fd = 2, .kind = .dup, .target = "1" });
+            try self.redirects.append(self.arena, done);
+            if (done.both) try self.redirects.append(self.arena, .{ .fd = 2, .kind = .dup, .target = "1" });
             self.pending_redirect = null;
             self.has_glob = false;
             self.in_word = false;
             return;
         }
         if (self.assign_name) |name| {
-            try self.assignments.append(.{ .name = name, .value = try self.word.toOwnedSlice() });
+            try self.assignments.append(self.arena, .{ .name = name, .value = try self.word.toOwnedSlice(self.arena) });
             self.pattern.clearRetainingCapacity();
             self.assign_name = null;
             self.in_word = false;
             return;
         }
-        const literal = try self.word.toOwnedSlice();
-        const pattern = try self.pattern.toOwnedSlice();
+        const literal = try self.word.toOwnedSlice(self.arena);
+        const pattern = try self.pattern.toOwnedSlice(self.arena);
         self.in_word = false;
         if (self.mode == .pattern) self.last_pattern = pattern;
         if (self.has_glob) {
@@ -283,18 +283,18 @@ pub const Parser = struct {
             if (self.mode == .words) {
                 const matches = try glob.expand(self.arena, pattern);
                 if (matches.len > 0) {
-                    try self.words.appendSlice(matches);
+                    try self.words.appendSlice(self.arena, matches);
                     return;
                 }
             }
         }
-        try self.words.append(literal);
+        try self.words.append(self.arena, literal);
     }
 
     fn appendLiteral(self: *Parser, c: u8) Error!void {
-        try self.word.append(c);
-        if (std.mem.indexOfScalar(u8, "*?[\\", c) != null) try self.pattern.append('\\');
-        try self.pattern.append(c);
+        try self.word.append(self.arena, c);
+        if (std.mem.indexOfScalar(u8, "*?[\\", c) != null) try self.pattern.append(self.arena, '\\');
+        try self.pattern.append(self.arena, c);
     }
 
     fn appendLiteralSlice(self: *Parser, bytes: []const u8) Error!void {
@@ -305,16 +305,16 @@ pub const Parser = struct {
         try self.flushWord();
         if (self.pending_redirect != null) return error.MissingTarget;
         if (self.words.items.len == 0 and self.assignments.items.len == 0 and self.redirects.items.len == 0) return error.MissingCommand;
-        try self.commands.append(.{
-            .argv = try self.words.toOwnedSlice(),
-            .assignments = try self.assignments.toOwnedSlice(),
-            .redirects = try self.redirects.toOwnedSlice(),
+        try self.commands.append(self.arena, .{
+            .argv = try self.words.toOwnedSlice(self.arena),
+            .assignments = try self.assignments.toOwnedSlice(self.arena),
+            .redirects = try self.redirects.toOwnedSlice(self.arena),
         });
     }
 
     fn endPipeline(self: *Parser, following: Join) Error!Pipeline {
         try self.endCommand();
-        const pipeline = Pipeline{ .commands = try self.commands.toOwnedSlice(), .join = self.pending_join };
+        const pipeline = Pipeline{ .commands = try self.commands.toOwnedSlice(self.arena), .join = self.pending_join };
         self.pending_join = following;
         self.expect_more = following != .always;
         return pipeline;
@@ -583,23 +583,23 @@ pub const Parser = struct {
     }
 
     fn expandOperand(self: *Parser, operand: []const u8) Error![]const u8 {
-        var out = std.ArrayList(u8).init(self.arena);
+        var out: std.ArrayList(u8) = .empty;
         var i: usize = 0;
         while (i < operand.len) {
             if (operand[i] == '\'') {
                 const close = std.mem.indexOfScalarPos(u8, operand, i + 1, '\'') orelse return error.UnterminatedQuote;
-                try out.appendSlice(operand[i + 1 .. close]);
+                try out.appendSlice(self.arena, operand[i + 1 .. close]);
                 i = close + 1;
             } else if (operand[i] == '"') {
                 var close = i + 1;
                 while (close < operand.len and operand[close] != '"') close += if (operand[close] == '\\') 2 else 1;
                 if (close >= operand.len) return error.UnterminatedQuote;
-                try out.appendSlice(try self.expandBody(operand[i + 1 .. close]));
+                try out.appendSlice(self.arena, try self.expandBody(operand[i + 1 .. close]));
                 i = close + 1;
             } else {
                 var end = i;
                 while (end < operand.len and operand[end] != '\'' and operand[end] != '"') end += 1;
-                try out.appendSlice(try self.expandBody(operand[i..end]));
+                try out.appendSlice(self.arena, try self.expandBody(operand[i..end]));
                 i = end;
             }
         }
@@ -628,39 +628,39 @@ pub const Parser = struct {
 
     fn readHeredoc(self: *Parser, delimiter: []const u8, strip_tabs: bool, quoted: bool) Error![]const u8 {
         const source = self.lines orelse return error.UnsupportedOperator;
-        var body = std.ArrayList(u8).init(self.arena);
+        var body: std.ArrayList(u8) = .empty;
         while (source.next(source.context, self.arena)) |raw| {
-            const line = if (strip_tabs) std.mem.trimLeft(u8, raw, "\t") else raw;
+            const line = if (strip_tabs) std.mem.trimStart(u8, raw, "\t") else raw;
             if (std.mem.eql(u8, line, delimiter)) break;
-            try body.appendSlice(line);
-            try body.append('\n');
+            try body.appendSlice(self.arena, line);
+            try body.append(self.arena, '\n');
         }
         if (quoted) return body.items;
         return self.expandBody(body.items);
     }
 
     pub fn expandBody(self: *Parser, text: []const u8) Error![]const u8 {
-        var out = std.ArrayList(u8).init(self.arena);
+        var out: std.ArrayList(u8) = .empty;
         var i: usize = 0;
         while (i < text.len) {
             const c = text[i];
             if (c == '\\' and i + 1 < text.len and std.mem.indexOfScalar(u8, "$`\\", text[i + 1]) != null) {
-                try out.append(text[i + 1]);
+                try out.append(self.arena, text[i + 1]);
                 i += 2;
             } else if (c == '`') {
                 const expansion = try self.backtick(text, i);
-                try out.appendSlice(expansion.value);
+                try out.appendSlice(self.arena, expansion.value);
                 i = expansion.end;
             } else if (c == '$') {
                 if (try self.dollar(text, i)) |expansion| {
-                    try out.appendSlice(expansion.value);
+                    try out.appendSlice(self.arena, expansion.value);
                     i = expansion.end;
                 } else {
-                    try out.append('$');
+                    try out.append(self.arena, '$');
                     i += 1;
                 }
             } else {
-                try out.append(c);
+                try out.append(self.arena, c);
                 i += 1;
             }
         }

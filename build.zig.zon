@@ -2,7 +2,7 @@
     .name = .zs,
     .version = "0.0.0",
     .fingerprint = 0x5d05a3059fe5981d, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.14.1",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

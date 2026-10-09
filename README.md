@@ -57,7 +57,7 @@
 
 ## ✦ Installation
 
-ZS needs [Zig](https://ziglang.org/download/) 0.14.1 or newer and runs on
+ZS needs [Zig](https://ziglang.org/download/) 0.16.0 or newer and runs on
 Linux.
 
 ```sh

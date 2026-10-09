@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const sys = @import("sys.zig");
 const vars = @import("vars.zig");
 const functions = @import("functions.zig");
 const aliases = @import("aliases.zig");
@@ -14,12 +15,12 @@ pub fn exists(name: []const u8) bool {
         if (std.mem.eql(u8, builtin, name)) return true;
     }
 
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const resolved = expandHome(&home_buf, name) orelse name;
     if (std.mem.indexOfScalar(u8, resolved, '/') != null) return isExecutable(resolved);
 
     const path = vars.get("PATH") orelse return false;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var dirs = std.mem.splitScalar(u8, path, ':');
     while (dirs.next()) |dir| {
         const candidate = std.fmt.bufPrint(&buf, "{s}/{s}", .{ if (dir.len == 0) "." else dir, name }) catch continue;
@@ -35,8 +36,8 @@ fn expandHome(buf: []u8, name: []const u8) ?[]const u8 {
 }
 
 fn isExecutable(path: []const u8) bool {
-    const stat = std.fs.cwd().statFile(path) catch return false;
+    const stat = sys.cwd().statFile(sys.io, path, .{}) catch return false;
     if (stat.kind != .file) return false;
-    posix.access(path, posix.X_OK) catch return false;
+    sys.access(path, posix.X_OK) catch return false;
     return true;
 }

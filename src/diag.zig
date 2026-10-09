@@ -1,4 +1,5 @@
 const std = @import("std");
+const sys = @import("sys.zig");
 
 pub fn warning(comptime fmt: []const u8, args: anytype) void {
     emit("\x1b[33m", fmt, args);
@@ -9,11 +10,10 @@ pub fn failure(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn emit(color: []const u8, comptime fmt: []const u8, args: anytype) void {
-    const file = std.io.getStdErr();
-    const writer = file.writer();
-    const tty = file.isTty();
-    if (tty) writer.writeAll(color) catch {};
-    writer.print("zs: " ++ fmt, args) catch {};
-    if (tty) writer.writeAll("\x1b[0m") catch {};
-    writer.writeAll("\n") catch {};
+    const file = sys.stderr();
+    const tty = sys.isTty(file);
+    if (tty) sys.writeAll(file, color) catch {};
+    sys.print(file, "zs: " ++ fmt, args) catch {};
+    if (tty) sys.writeAll(file, "\x1b[0m") catch {};
+    sys.writeAll(file, "\n") catch {};
 }

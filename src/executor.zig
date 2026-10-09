@@ -12,6 +12,7 @@ const diag = @import("diag.zig");
 const rc = @import("rc.zig");
 const history = @import("history.zig");
 const aliases = @import("aliases.zig");
+const sys = @import("sys.zig");
 
 pub const Outcome = union(enum) {
     status: u8,
@@ -43,7 +44,7 @@ var sigint_seen = false;
 pub fn ignoreInteractiveSignals() void {
     const ignore = posix.Sigaction{
         .handler = .{ .handler = posix.SIG.IGN },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = 0,
     };
     posix.sigaction(posix.SIG.INT, &ignore, null);
@@ -53,7 +54,7 @@ pub fn ignoreInteractiveSignals() void {
 fn restoreDefaultSignals() void {
     const default = posix.Sigaction{
         .handler = .{ .handler = posix.SIG.DFL },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = 0,
     };
     posix.sigaction(posix.SIG.INT, &default, null);
@@ -230,11 +231,11 @@ pub const Shell = struct {
     }
 
     fn execSubshell(self: *Shell, arena: std.mem.Allocator, body: ast.List, lines: ?parser.LineSource) anyerror!Flow {
-        const pid = try posix.fork();
+        const pid = try sys.fork();
         if (pid == 0) {
             restoreDefaultSignals();
-            const flow = self.execList(arena, body, lines) catch posix.exit(1);
-            posix.exit(switch (flow) {
+            const flow = self.execList(arena, body, lines) catch sys.exit(1);
+            sys.exit(switch (flow) {
                 .exit => |code| code,
                 .return_fn => |code| code,
                 else => self.last_status,
@@ -243,7 +244,7 @@ pub const Shell = struct {
         var interrupted = false;
         self.last_status = reap(pid, &interrupted);
         if (interrupted) {
-            std.io.getStdOut().writeAll("\n") catch {};
+            sys.writeAll(sys.stdout(), "\n") catch {};
             sigint_seen = false;
             return .interrupted;
         }
@@ -259,16 +260,16 @@ pub const Shell = struct {
     }
 
     fn execPipelineNodes(self: *Shell, arena: std.mem.Allocator, stages: []const ast.Node, lines: ?parser.LineSource) anyerror!Flow {
-        const pids = try arena.alloc(posix.pid_t, stages.len);
-        var input: ?posix.fd_t = null;
+        const pids = try arena.alloc(sys.pid_t, stages.len);
+        var input: ?sys.fd_t = null;
         var spawned: usize = 0;
         for (stages, 0..) |stage, i| {
-            const output: ?[2]posix.fd_t = if (i + 1 == stages.len) null else try posix.pipe();
-            const pid = posix.fork() catch |err| {
-                if (input) |fd| posix.close(fd);
+            const output: ?[2]sys.fd_t = if (i + 1 == stages.len) null else try sys.pipe();
+            const pid = sys.fork() catch |err| {
+                if (input) |fd| sys.close(fd);
                 if (output) |fds| {
-                    posix.close(fds[0]);
-                    posix.close(fds[1]);
+                    sys.close(fds[0]);
+                    sys.close(fds[1]);
                 }
                 var interrupted = false;
                 for (pids[0..spawned]) |spawned_pid| _ = reap(spawned_pid, &interrupted);
@@ -277,16 +278,16 @@ pub const Shell = struct {
             if (pid == 0) {
                 restoreDefaultSignals();
                 if (input) |fd| {
-                    posix.dup2(fd, posix.STDIN_FILENO) catch posix.exit(126);
-                    posix.close(fd);
+                    sys.dup2(fd, sys.STDIN_FILENO) catch sys.exit(126);
+                    sys.close(fd);
                 }
                 if (output) |fds| {
-                    posix.dup2(fds[1], posix.STDOUT_FILENO) catch posix.exit(126);
-                    posix.close(fds[0]);
-                    posix.close(fds[1]);
+                    sys.dup2(fds[1], sys.STDOUT_FILENO) catch sys.exit(126);
+                    sys.close(fds[0]);
+                    sys.close(fds[1]);
                 }
-                const flow = self.execNode(arena, stage, lines) catch posix.exit(1);
-                posix.exit(switch (flow) {
+                const flow = self.execNode(arena, stage, lines) catch sys.exit(1);
+                sys.exit(switch (flow) {
                     .exit => |code| code,
                     .return_fn => |code| code,
                     else => self.last_status,
@@ -294,9 +295,9 @@ pub const Shell = struct {
             }
             pids[i] = pid;
             spawned += 1;
-            if (input) |fd| posix.close(fd);
+            if (input) |fd| sys.close(fd);
             if (output) |fds| {
-                posix.close(fds[1]);
+                sys.close(fds[1]);
                 input = fds[0];
             } else {
                 input = null;
@@ -307,7 +308,7 @@ pub const Shell = struct {
         for (pids) |pid| status = reap(pid, &interrupted);
         self.last_status = status;
         if (interrupted) {
-            std.io.getStdOut().writeAll("\n") catch {};
+            sys.writeAll(sys.stdout(), "\n") catch {};
             sigint_seen = false;
             return .interrupted;
         }
@@ -377,14 +378,14 @@ pub const Shell = struct {
             const single = first.commands.len == 1 and first.commands[0].argv.len > 0 and
                 first.commands[0].redirects.len == 0 and first.commands[0].assignments.len == 0;
             if (!single or (try p.next(self.last_status)) != null) {
-                var script = std.ArrayList(u8).init(arena);
-                try script.appendSlice(value);
+                var script: std.ArrayList(u8) = .empty;
+                try script.appendSlice(arena, value);
                 for (current.argv[1..]) |arg| {
-                    try script.appendSlice(" '");
+                    try script.appendSlice(arena, " '");
                     for (arg) |c| {
-                        if (c == '\'') try script.appendSlice("'\\''") else try script.append(c);
+                        if (c == '\'') try script.appendSlice(arena, "'\\''") else try script.append(arena, c);
                     }
-                    try script.append('\'');
+                    try script.append(arena, '\'');
                 }
                 return .{ .script = script.items };
             }
@@ -441,16 +442,16 @@ pub const Shell = struct {
             }
         }
 
-        const pids = try arena.alloc(posix.pid_t, cmds.len);
-        var input: ?posix.fd_t = null;
+        const pids = try arena.alloc(sys.pid_t, cmds.len);
+        var input: ?sys.fd_t = null;
         var spawned: usize = 0;
         for (cmds, 0..) |cmd, i| {
-            const output: ?[2]posix.fd_t = if (i + 1 == cmds.len) null else try posix.pipe();
-            const pid = posix.fork() catch |err| {
-                if (input) |fd| posix.close(fd);
+            const output: ?[2]sys.fd_t = if (i + 1 == cmds.len) null else try sys.pipe();
+            const pid = sys.fork() catch |err| {
+                if (input) |fd| sys.close(fd);
                 if (output) |fds| {
-                    posix.close(fds[0]);
-                    posix.close(fds[1]);
+                    sys.close(fds[0]);
+                    sys.close(fds[1]);
                 }
                 var interrupted = false;
                 for (pids[0..spawned]) |spawned_pid| _ = reap(spawned_pid, &interrupted);
@@ -460,9 +461,9 @@ pub const Shell = struct {
 
             pids[i] = pid;
             spawned += 1;
-            if (input) |fd| posix.close(fd);
+            if (input) |fd| sys.close(fd);
             if (output) |fds| {
-                posix.close(fds[1]);
+                sys.close(fds[1]);
                 input = fds[0];
             } else {
                 input = null;
@@ -472,36 +473,36 @@ pub const Shell = struct {
         var status: u8 = 0;
         var interrupted = false;
         for (pids) |pid| status = reap(pid, &interrupted);
-        if (interrupted) std.io.getStdOut().writeAll("\n") catch {};
+        if (interrupted) sys.writeAll(sys.stdout(), "\n") catch {};
         return .{ .status = status };
     }
 
-    fn child(self: *Shell, arena: std.mem.Allocator, cmd: parser.Command, input: ?posix.fd_t, output: ?[2]posix.fd_t) noreturn {
+    fn child(self: *Shell, arena: std.mem.Allocator, cmd: parser.Command, input: ?sys.fd_t, output: ?[2]sys.fd_t) noreturn {
         restoreDefaultSignals();
         if (input) |fd| {
-            posix.dup2(fd, posix.STDIN_FILENO) catch posix.exit(126);
-            posix.close(fd);
+            sys.dup2(fd, sys.STDIN_FILENO) catch sys.exit(126);
+            sys.close(fd);
         }
         if (output) |fds| {
-            posix.dup2(fds[1], posix.STDOUT_FILENO) catch posix.exit(126);
-            posix.close(fds[0]);
-            posix.close(fds[1]);
+            sys.dup2(fds[1], sys.STDOUT_FILENO) catch sys.exit(126);
+            sys.close(fds[0]);
+            sys.close(fds[1]);
         }
-        if (!applyRedirects(cmd.redirects)) posix.exit(1);
-        if (cmd.argv.len == 0) posix.exit(assign(cmd.assignments));
+        if (!applyRedirects(cmd.redirects)) sys.exit(1);
+        if (cmd.argv.len == 0) sys.exit(assign(cmd.assignments));
         if (functions.has(cmd.argv[0])) {
-            const outcome = self.callFunction(cmd.argv) catch posix.exit(1);
+            const outcome = self.callFunction(cmd.argv) catch sys.exit(1);
             switch (outcome) {
-                .status, .exit, .fn_return => |code| posix.exit(code),
-                else => posix.exit(0),
+                .status, .exit, .fn_return => |code| sys.exit(code),
+                else => sys.exit(0),
             }
         }
         if (self.builtin(arena, cmd.argv)) |outcome| {
             switch (outcome) {
-                .status => |status| posix.exit(status),
-                .exit => |code| posix.exit(code),
-                .fn_return => |code| posix.exit(code),
-                else => posix.exit(0),
+                .status => |status| sys.exit(status),
+                .exit => |code| sys.exit(code),
+                .fn_return => |code| sys.exit(code),
+                else => sys.exit(0),
             }
         }
         execute(arena, cmd);
@@ -552,7 +553,7 @@ pub const Shell = struct {
             printError("source: maximum nesting level exceeded ({d})", .{max_call_depth});
             return .{ .status = 1 };
         }
-        var default_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var default_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var path: []const u8 = undefined;
         var label: []const u8 = "~/.zsrc";
         if (args.len == 1) {
@@ -578,9 +579,9 @@ pub const Shell = struct {
     fn setOptions(self: *Shell, arena: std.mem.Allocator, args: []const []const u8) u8 {
         if (args.len == 0) {
             const names = vars.variableNames(arena) catch return 1;
-            const stdout = std.io.getStdOut().writer();
+            const stdout = sys.stdout();
             for (names) |name| {
-                stdout.print("{s}={s}\n", .{ name, vars.get(name) orelse "" }) catch return 1;
+                sys.print(stdout, "{s}={s}\n", .{ name, vars.get(name) orelse "" }) catch return 1;
             }
             return 0;
         }
@@ -671,32 +672,32 @@ pub const Shell = struct {
 
 fn captureOutput(context: *anyopaque, arena: std.mem.Allocator, command: []const u8) parser.Error![]const u8 {
     const self: *Shell = @ptrCast(@alignCast(context));
-    const fds = posix.pipe() catch return error.SubstitutionFailed;
-    const pid = posix.fork() catch {
-        posix.close(fds[0]);
-        posix.close(fds[1]);
+    const fds = sys.pipe() catch return error.SubstitutionFailed;
+    const pid = sys.fork() catch {
+        sys.close(fds[0]);
+        sys.close(fds[1]);
         return error.SubstitutionFailed;
     };
     if (pid == 0) {
         restoreDefaultSignals();
-        posix.close(fds[0]);
-        posix.dup2(fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
-        posix.close(fds[1]);
-        const code = self.run(arena, command, null) catch posix.exit(1);
-        posix.exit(code orelse self.last_status);
+        sys.close(fds[0]);
+        sys.dup2(fds[1], sys.STDOUT_FILENO) catch sys.exit(1);
+        sys.close(fds[1]);
+        const code = self.run(arena, command, null) catch sys.exit(1);
+        sys.exit(code orelse self.last_status);
     }
-    posix.close(fds[1]);
-    var output = std.ArrayList(u8).init(arena);
+    sys.close(fds[1]);
+    var output: std.ArrayList(u8) = .empty;
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = posix.read(fds[0], &buf) catch break;
+        const n = sys.read(fds[0], &buf) catch break;
         if (n == 0) break;
-        try output.appendSlice(buf[0..n]);
+        try output.appendSlice(arena, buf[0..n]);
     }
-    posix.close(fds[0]);
+    sys.close(fds[0]);
     var interrupted = false;
     self.substitution_status = reap(pid, &interrupted);
-    return std.mem.trimRight(u8, output.items, "\n");
+    return std.mem.trimEnd(u8, output.items, "\n");
 }
 
 fn isBuiltin(name: []const u8) bool {
@@ -706,55 +707,55 @@ fn isBuiltin(name: []const u8) bool {
     return false;
 }
 
-fn saveStandardFds() [3]?posix.fd_t {
-    var saved: [3]?posix.fd_t = .{ null, null, null };
-    for (&saved, 0..) |*slot, fd| slot.* = posix.dup(@intCast(fd)) catch null;
+fn saveStandardFds() [3]?sys.fd_t {
+    var saved: [3]?sys.fd_t = .{ null, null, null };
+    for (&saved, 0..) |*slot, fd| slot.* = sys.dup(@intCast(fd)) catch null;
     return saved;
 }
 
-fn restoreStandardFds(saved: [3]?posix.fd_t) void {
+fn restoreStandardFds(saved: [3]?sys.fd_t) void {
     for (saved, 0..) |maybe, fd| {
         const copy = maybe orelse continue;
-        posix.dup2(copy, @intCast(fd)) catch {};
-        posix.close(copy);
+        sys.dup2(copy, @intCast(fd)) catch {};
+        sys.close(copy);
     }
 }
 
 fn applyRedirects(redirects: []const parser.Redirect) bool {
     for (redirects) |redirect| {
-        const fd: posix.fd_t = redirect.fd;
+        const fd: sys.fd_t = redirect.fd;
         if (redirect.kind == .heredoc) {
             const memory = posix.memfd_create("zs-heredoc", 0) catch {
                 printError("cannot create here-document", .{});
                 return false;
             };
-            const file = std.fs.File{ .handle = memory };
-            file.writeAll(redirect.target) catch {
-                posix.close(memory);
+            const file: std.Io.File = .{ .handle = memory, .flags = .{ .nonblocking = false } };
+            sys.writeAll(file, redirect.target) catch {
+                sys.close(memory);
                 printError("cannot write here-document", .{});
                 return false;
             };
-            posix.lseek_SET(memory, 0) catch {};
+            sys.lseekSet(memory, 0);
             if (memory != fd) {
-                posix.dup2(memory, fd) catch {
-                    posix.close(memory);
+                sys.dup2(memory, fd) catch {
+                    sys.close(memory);
                     printError("{d}: Bad file descriptor", .{fd});
                     return false;
                 };
-                posix.close(memory);
+                sys.close(memory);
             }
             continue;
         }
         if (redirect.kind == .dup) {
             if (std.mem.eql(u8, redirect.target, "-")) {
-                posix.close(fd);
+                sys.close(fd);
                 continue;
             }
-            const source = std.fmt.parseInt(posix.fd_t, redirect.target, 10) catch {
+            const source = std.fmt.parseInt(sys.fd_t, redirect.target, 10) catch {
                 printError("{s}: ambiguous redirect", .{redirect.target});
                 return false;
             };
-            posix.dup2(source, fd) catch {
+            sys.dup2(source, fd) catch {
                 printError("{d}: Bad file descriptor", .{source});
                 return false;
             };
@@ -766,17 +767,17 @@ fn applyRedirects(redirects: []const parser.Redirect) bool {
             .append => .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
             .dup, .heredoc => unreachable,
         };
-        const opened = posix.open(redirect.target, flags, 0o666) catch |err| {
+        const opened = sys.open(redirect.target, flags, 0o666) catch |err| {
             printError("{s}: {s}", .{ redirect.target, describe(err) });
             return false;
         };
         if (opened != fd) {
-            posix.dup2(opened, fd) catch {
-                posix.close(opened);
+            sys.dup2(opened, fd) catch {
+                sys.close(opened);
                 printError("{d}: Bad file descriptor", .{fd});
                 return false;
             };
-            posix.close(opened);
+            sys.close(opened);
         }
     }
     return true;
@@ -811,28 +812,28 @@ fn readLine(args: []const []const u8) u8 {
             return 1;
         }
     }
-    if (prompt) |text| std.io.getStdErr().writeAll(text) catch {};
+    if (prompt) |text| sys.writeAll(sys.stderr(), text) catch {};
 
-    var line = std.ArrayList(u8).init(std.heap.page_allocator);
-    defer line.deinit();
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(std.heap.page_allocator);
     var reached_eof = false;
     var byte: [1]u8 = undefined;
     while (true) {
-        const count = posix.read(posix.STDIN_FILENO, &byte) catch 0;
+        const count = sys.read(sys.STDIN_FILENO, &byte) catch 0;
         if (count == 0) {
             reached_eof = true;
             break;
         }
         if (byte[0] == '\n') break;
         if (!raw and byte[0] == '\\') {
-            const escaped = posix.read(posix.STDIN_FILENO, &byte) catch 0;
+            const escaped = sys.read(sys.STDIN_FILENO, &byte) catch 0;
             if (escaped == 0) {
                 reached_eof = true;
                 break;
             }
             if (byte[0] == '\n') continue;
         }
-        line.append(byte[0]) catch return 1;
+        line.append(std.heap.page_allocator, byte[0]) catch return 1;
     }
 
     const ifs = vars.get("IFS") orelse " \t\n";
@@ -841,9 +842,9 @@ fn readLine(args: []const []const u8) u8 {
     } else {
         var rest: []const u8 = line.items;
         for (names, 0..) |name, index| {
-            rest = std.mem.trimLeft(u8, rest, ifs);
+            rest = std.mem.trimStart(u8, rest, ifs);
             if (index + 1 == names.len) {
-                vars.set(name, std.mem.trimRight(u8, rest, ifs)) catch return 1;
+                vars.set(name, std.mem.trimEnd(u8, rest, ifs)) catch return 1;
                 rest = "";
             } else {
                 const end = std.mem.indexOfAny(u8, rest, ifs) orelse rest.len;
@@ -880,9 +881,9 @@ fn assign(assignments: []const vars.Assignment) u8 {
 fn exportVariables(arena: std.mem.Allocator, args: []const []const u8) u8 {
     if (args.len == 0) {
         const names = vars.exportedNames(arena) catch return 1;
-        const stdout = std.io.getStdOut().writer();
+        const stdout = sys.stdout();
         for (names) |name| {
-            stdout.print("export {s}=\"{s}\"\n", .{ name, vars.get(name) orelse "" }) catch return 1;
+            sys.print(stdout, "export {s}=\"{s}\"\n", .{ name, vars.get(name) orelse "" }) catch return 1;
         }
         return 0;
     }
@@ -908,9 +909,9 @@ fn exportVariables(arena: std.mem.Allocator, args: []const []const u8) u8 {
 }
 
 fn promptCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
-    const stdout = std.io.getStdOut().writer();
+    const stdout = sys.stdout();
     if (args.len == 0) {
-        stdout.print("{s}\n", .{prompts.format()}) catch return 1;
+        sys.print(stdout, "{s}\n", .{prompts.format()}) catch return 1;
         return 0;
     }
     if (args.len > 1) {
@@ -923,7 +924,7 @@ fn promptCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
         return 0;
     }
     if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-        stdout.writeAll(prompts.help) catch return 1;
+        sys.writeAll(stdout, prompts.help) catch return 1;
         return 0;
     }
     if (std.mem.startsWith(u8, arg, "--")) {
@@ -1029,22 +1030,22 @@ fn changeDirectory(args: []const []const u8) u8 {
         };
     }
 
-    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const old: ?[]u8 = std.process.getCwd(&old_buf) catch null;
-    posix.chdir(target) catch |err| {
+    var old_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const old: ?[]u8 = sys.getCwd(&old_buf) catch null;
+    sys.chdir(target) catch |err| {
         printError("cd: {s}: {s}", .{ target, describe(err) });
         return 1;
     };
 
-    var new_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.process.getCwd(&new_buf)) |new| {
+    var new_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (sys.getCwd(&new_buf)) |new| {
         if (old) |previous| {
             vars.set("OLDPWD", previous) catch {};
             vars.markExported("OLDPWD") catch {};
         }
         vars.set("PWD", new) catch {};
         vars.markExported("PWD") catch {};
-        if (announce) std.io.getStdOut().writer().print("{s}\n", .{new}) catch {};
+        if (announce) sys.print(sys.stdout(), "{s}\n", .{new}) catch {};
     } else |_| {}
     return 0;
 }
@@ -1058,16 +1059,20 @@ fn exitShell(last_status: u8, args: []const []const u8) Outcome {
     return .{ .exit = @intCast(@mod(code, 256)) };
 }
 
-fn printAlias(writer: anytype, name: []const u8, value: []const u8) !void {
+fn printAlias(file: std.Io.File, name: []const u8, value: []const u8) !void {
+    var buf: [1024]u8 = undefined;
+    var fw = file.writerStreaming(sys.io, &buf);
+    const writer = &fw.interface;
     try writer.print("alias {s}='", .{name});
     for (value) |c| {
         if (c == '\'') try writer.writeAll("'\\''") else try writer.writeByte(c);
     }
     try writer.writeAll("'\n");
+    try writer.flush();
 }
 
 fn aliasCommand(arena: std.mem.Allocator, args: []const []const u8) u8 {
-    const stdout = std.io.getStdOut().writer();
+    const stdout = sys.stdout();
     var status: u8 = 0;
     if (args.len == 0) {
         const names = aliases.names(arena) catch return 1;
@@ -1114,9 +1119,9 @@ fn unaliasCommand(args: []const []const u8) u8 {
 
 fn historyCommand(args: []const []const u8) u8 {
     if (args.len == 0) {
-        const stdout = std.io.getStdOut().writer();
+        const stdout = sys.stdout();
         for (history.entries.items, 1..) |entry, number| {
-            stdout.print("{d:>5}  {s}\n", .{ number, entry }) catch return 1;
+            sys.print(stdout, "{d:>5}  {s}\n", .{ number, entry }) catch return 1;
         }
         return 0;
     }
@@ -1136,11 +1141,11 @@ fn replaceProcess(arena: std.mem.Allocator, args: []const []const u8) u8 {
 
 fn execute(arena: std.mem.Allocator, cmd: parser.Command) noreturn {
     const argv = cmd.argv;
-    const argv_z = arena.allocSentinel(?[*:0]const u8, argv.len, null) catch posix.exit(1);
+    const argv_z = arena.allocSentinel(?[*:0]const u8, argv.len, null) catch sys.exit(1);
     for (argv, 0..) |arg, i| {
-        argv_z[i] = (arena.dupeZ(u8, arg) catch posix.exit(1)).ptr;
+        argv_z[i] = (arena.dupeZ(u8, arg) catch sys.exit(1)).ptr;
     }
-    const envp = vars.environ(arena, cmd.assignments) catch posix.exit(1);
+    const envp = vars.environ(arena, cmd.assignments) catch sys.exit(1);
     const err = searchAndExec(arena, argv[0], cmd.assignments, argv_z.ptr, envp.ptr);
     switch (err) {
         error.FileNotFound => {
@@ -1149,11 +1154,11 @@ fn execute(arena: std.mem.Allocator, cmd: parser.Command) noreturn {
             } else {
                 printError("{s}: command not found", .{argv[0]});
             }
-            posix.exit(127);
+            sys.exit(127);
         },
         else => {
             printError("{s}: {s}", .{ argv[0], describe(err) });
-            posix.exit(126);
+            sys.exit(126);
         },
     }
 }
@@ -1164,8 +1169,8 @@ fn searchAndExec(
     assignments: []const vars.Assignment,
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
-) posix.ExecveError {
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return posix.execveZ(argv[0].?, argv, envp);
+) sys.ExecveError {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return sys.execve(argv[0].?, argv, envp);
 
     var path: []const u8 = vars.get("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
     for (assignments) |assignment| {
@@ -1174,8 +1179,8 @@ fn searchAndExec(
     var denied = false;
     var dirs = std.mem.splitScalar(u8, path, ':');
     while (dirs.next()) |dir| {
-        const candidate = std.fmt.allocPrintZ(arena, "{s}/{s}", .{ if (dir.len == 0) "." else dir, name }) catch return error.SystemResources;
-        switch (posix.execveZ(candidate, argv, envp)) {
+        const candidate = std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ if (dir.len == 0) "." else dir, name }, 0) catch return error.SystemResources;
+        switch (sys.execve(candidate, argv, envp)) {
             error.FileNotFound, error.NotDir => {},
             error.AccessDenied => denied = true,
             else => |err| return err,
@@ -1184,16 +1189,16 @@ fn searchAndExec(
     return if (denied) error.AccessDenied else error.FileNotFound;
 }
 
-fn reap(pid: posix.pid_t, interrupted: *bool) u8 {
-    const status = posix.waitpid(pid, 0).status;
+fn reap(pid: sys.pid_t, interrupted: *bool) u8 {
+    const status = sys.waitpid(pid);
     if (posix.W.IFEXITED(status)) return posix.W.EXITSTATUS(status);
     if (posix.W.IFSIGNALED(status)) {
         const sig = posix.W.TERMSIG(status);
-        if (sig == posix.SIG.INT) {
+        if (sig == .INT) {
             interrupted.* = true;
             sigint_seen = true;
         }
-        return @intCast(128 + sig);
+        return @intCast(128 + @intFromEnum(sig));
     }
     return 1;
 }
@@ -1211,5 +1216,5 @@ fn describe(err: anyerror) []const u8 {
 }
 
 fn printError(comptime fmt: []const u8, args: anytype) void {
-    std.io.getStdErr().writer().print("zs: " ++ fmt ++ "\n", args) catch {};
+    sys.print(sys.stderr(), "zs: " ++ fmt ++ "\n", args) catch {};
 }

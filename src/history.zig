@@ -1,11 +1,12 @@
 const std = @import("std");
 const vars = @import("vars.zig");
+const sys = @import("sys.zig");
 
 const max_loaded = 10000;
 
 var allocator: std.mem.Allocator = undefined;
 var path: ?[]u8 = null;
-pub var entries: std.ArrayListUnmanaged([]u8) = .{};
+pub var entries: std.ArrayList([]u8) = .empty;
 
 pub fn init(gpa: std.mem.Allocator) void {
     allocator = gpa;
@@ -28,14 +29,14 @@ pub fn load() void {
     if (path) |old| allocator.free(old);
     path = location;
 
-    const text = std.fs.cwd().readFileAlloc(allocator, location, 64 << 20) catch return;
+    const text = sys.cwd().readFileAlloc(sys.io, location, allocator, .limited(64 << 20)) catch return;
     defer allocator.free(text);
 
     var lines = std.mem.splitScalar(u8, text, '\n');
-    var all = std.ArrayList([]const u8).init(allocator);
-    defer all.deinit();
+    var all: std.ArrayList([]const u8) = .empty;
+    defer all.deinit(allocator);
     while (lines.next()) |line| {
-        if (line.len > 0) all.append(line) catch return;
+        if (line.len > 0) all.append(allocator, line) catch return;
     }
     const start = if (all.items.len > max_loaded) all.items.len - max_loaded else 0;
     for (all.items[start..]) |line| push(line) catch return;
@@ -53,8 +54,8 @@ pub fn clear() void {
     for (entries.items) |entry| allocator.free(entry);
     entries.clearRetainingCapacity();
     const location = path orelse return;
-    const file = std.fs.cwd().createFile(location, .{ .truncate = true, .mode = 0o600 }) catch return;
-    file.close();
+    const file = sys.cwd().createFile(sys.io, location, .{ .truncate = true, .permissions = .fromMode(0o600) }) catch return;
+    file.close(sys.io);
 }
 
 fn push(line: []const u8) !void {
@@ -79,9 +80,9 @@ fn persist(line: []const u8) void {
     if (!appendEnabled()) return;
     const location = path orelse return;
     if (std.mem.indexOfScalar(u8, line, '\n') != null) return;
-    const file = std.fs.cwd().createFile(location, .{ .truncate = false, .mode = 0o600 }) catch return;
-    defer file.close();
-    file.seekFromEnd(0) catch return;
-    file.writeAll(line) catch return;
-    file.writeAll("\n") catch return;
+    const file = sys.cwd().createFile(sys.io, location, .{ .truncate = false, .permissions = .fromMode(0o600) }) catch return;
+    defer file.close(sys.io);
+    const end = file.length(sys.io) catch return;
+    file.writePositionalAll(sys.io, line, end) catch return;
+    file.writePositionalAll(sys.io, "\n", end + line.len) catch return;
 }

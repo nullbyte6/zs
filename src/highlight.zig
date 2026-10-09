@@ -181,7 +181,7 @@ fn isAssignment(word: []const u8) bool {
 }
 
 fn commandColor(word: []const u8) []const u8 {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const name = unquote(&buf, word) orelse return invalid_color;
     return if (commands.exists(name)) command_color else invalid_color;
 }

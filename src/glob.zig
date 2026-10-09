@@ -1,16 +1,17 @@
 const std = @import("std");
+const sys = @import("sys.zig");
 
 pub fn expand(arena: std.mem.Allocator, pattern: []const u8) ![]const []const u8 {
     const absolute = pattern.len > 0 and pattern[0] == '/';
-    var prefixes = std.ArrayList([]const u8).init(arena);
-    try prefixes.append(if (absolute) "/" else "");
+    var prefixes: std.ArrayList([]const u8) = .empty;
+    try prefixes.append(arena, if (absolute) "/" else "");
 
     var segments = std.mem.tokenizeScalar(u8, pattern, '/');
     while (segments.next()) |segment| {
-        var results = std.ArrayList([]const u8).init(arena);
+        var results: std.ArrayList([]const u8) = .empty;
         if (!hasWildcard(segment)) {
             const literal = try unescape(arena, segment);
-            for (prefixes.items) |prefix| try results.append(try join(arena, prefix, literal));
+            for (prefixes.items) |prefix| try results.append(arena, try join(arena, prefix, literal));
         } else {
             for (prefixes.items) |prefix| try collect(arena, prefix, segment, &results);
         }
@@ -19,27 +20,27 @@ pub fn expand(arena: std.mem.Allocator, pattern: []const u8) ![]const []const u8
     }
 
     const trailing_slash = pattern.len > 1 and pattern[pattern.len - 1] == '/';
-    var matches = std.ArrayList([]const u8).init(arena);
+    var matches: std.ArrayList([]const u8) = .empty;
     for (prefixes.items) |path| {
         const full = if (trailing_slash) try std.fmt.allocPrint(arena, "{s}/", .{path}) else path;
-        std.fs.cwd().access(full, .{}) catch continue;
-        try matches.append(full);
+        sys.cwd().access(sys.io, full, .{}) catch continue;
+        try matches.append(arena, full);
     }
     return matches.items;
 }
 
 fn collect(arena: std.mem.Allocator, prefix: []const u8, segment: []const u8, results: *std.ArrayList([]const u8)) !void {
-    var dir = std.fs.cwd().openDir(if (prefix.len == 0) "." else prefix, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = sys.cwd().openDir(sys.io, if (prefix.len == 0) "." else prefix, .{ .iterate = true }) catch return;
+    defer dir.close(sys.io);
 
-    var names = std.ArrayList([]const u8).init(arena);
+    var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(sys.io) catch null) |entry| {
         if (entry.name[0] == '.' and segment[0] != '.') continue;
-        if (match(segment, entry.name)) try names.append(try arena.dupe(u8, entry.name));
+        if (match(segment, entry.name)) try names.append(arena, try arena.dupe(u8, entry.name));
     }
     std.mem.sort([]const u8, names.items, {}, lessThan);
-    for (names.items) |name| try results.append(try join(arena, prefix, name));
+    for (names.items) |name| try results.append(arena, try join(arena, prefix, name));
 }
 
 fn join(arena: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
@@ -65,11 +66,11 @@ fn hasWildcard(segment: []const u8) bool {
 }
 
 fn unescape(arena: std.mem.Allocator, segment: []const u8) ![]const u8 {
-    var out = std.ArrayList(u8).init(arena);
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < segment.len) : (i += 1) {
         if (segment[i] == '\\' and i + 1 < segment.len) i += 1;
-        try out.append(segment[i]);
+        try out.append(arena, segment[i]);
     }
     return out.items;
 }

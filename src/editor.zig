@@ -5,6 +5,7 @@ const highlight = @import("highlight.zig");
 const history = @import("history.zig");
 const spec = @import("spec.zig");
 const unicode = @import("unicode.zig");
+const sys = @import("sys.zig");
 
 const Cycle = struct {
     items: [][]u8,
@@ -36,17 +37,17 @@ pub const Editor = struct {
     pub fn init(allocator: std.mem.Allocator, prompt: []const u8) Editor {
         return .{
             .allocator = allocator,
-            .buffer = .init(allocator),
+            .buffer = .empty,
             .prompt = prompt,
-            .ghost_text = .init(allocator),
-            .ghost_insert = .init(allocator),
+            .ghost_text = .empty,
+            .ghost_insert = .empty,
         };
     }
 
     pub fn deinit(self: *Editor) void {
-        self.buffer.deinit();
-        self.ghost_text.deinit();
-        self.ghost_insert.deinit();
+        self.buffer.deinit(self.allocator);
+        self.ghost_text.deinit(self.allocator);
+        self.ghost_insert.deinit(self.allocator);
         self.clearCycle();
         self.clearDraft();
     }
@@ -88,25 +89,29 @@ pub const Editor = struct {
     }
 
     fn readPlain(self: *Editor) !?[]const u8 {
-        const stdout = std.io.getStdOut().writer();
-        try stdout.writeAll(self.prompt);
-        std.io.getStdIn().reader().streamUntilDelimiter(self.buffer.writer(), '\n', null) catch |err| switch (err) {
-            error.EndOfStream => {
-                try stdout.writeAll("\n");
-                return null;
-            },
-            else => return err,
-        };
-        return self.buffer.items;
+        const stdout = sys.stdout();
+        try sys.writeAll(stdout, self.prompt);
+        while (true) {
+            const byte = readByte() catch |err| switch (err) {
+                error.EndOfStream => {
+                    if (self.buffer.items.len > 0) return self.buffer.items;
+                    try sys.writeAll(stdout, "\n");
+                    return null;
+                },
+                else => return err,
+            };
+            if (byte == '\n') return self.buffer.items;
+            try self.buffer.append(self.allocator, byte);
+        }
     }
 
     fn readRaw(self: *Editor) !?[]const u8 {
-        const stdout = std.io.getStdOut().writer();
+        const stdout = sys.stdout();
         try self.redraw();
         while (true) {
             const byte = readByte() catch |err| switch (err) {
                 error.EndOfStream => {
-                    try stdout.writeAll("\r\n");
+                    try sys.writeAll(stdout, "\r\n");
                     return null;
                 },
                 else => return err,
@@ -115,20 +120,20 @@ pub const Editor = struct {
             switch (byte) {
                 '\r', '\n' => {
                     try self.finishLine();
-                    try stdout.writeAll("\r\n");
-                    if (self.marks) try stdout.writeAll("\x1b]133;C\x07");
+                    try sys.writeAll(stdout, "\r\n");
+                    if (self.marks) try sys.writeAll(stdout, "\x1b]133;C\x07");
                     return self.buffer.items;
                 },
                 3 => {
                     try self.finishLine();
-                    try stdout.writeAll("^C\r\n");
+                    try sys.writeAll(stdout, "^C\r\n");
                     self.buffer.clearRetainingCapacity();
                     self.cursor = 0;
                     return self.buffer.items;
                 },
                 4 => {
                     if (self.buffer.items.len == 0) {
-                        try stdout.writeAll("\r\n");
+                        try sys.writeAll(stdout, "\r\n");
                         return null;
                     }
                     try self.deleteForward();
@@ -136,7 +141,7 @@ pub const Editor = struct {
                 1 => self.cursor = 0,
                 9 => try self.cycleComplete(true),
                 12 => {
-                    try stdout.writeAll("\x1b[H\x1b[2J");
+                    try sys.writeAll(stdout, "\x1b[H\x1b[2J");
                     self.cursor_row = 0;
                 },
                 14 => try self.historyNext(),
@@ -201,7 +206,7 @@ pub const Editor = struct {
     fn applyCycle(self: *Editor) void {
         const cycle = &self.cycle.?;
         const text = cycle.items[cycle.index];
-        self.buffer.replaceRange(cycle.start, cycle.len, text) catch return;
+        self.buffer.replaceRange(self.allocator, cycle.start, cycle.len, text) catch return;
         cycle.len = text.len;
         self.cursor = cycle.start + text.len;
     }
@@ -227,17 +232,17 @@ pub const Editor = struct {
         }
         if (completion.hint(typed, self.cursor)) |hint| {
             if (hint.quoted) {
-                try self.ghost_text.writer().print("\"{s}\"", .{hint.label});
-                try self.ghost_insert.appendSlice("\"\"");
+                try self.ghost_text.print(self.allocator, "\"{s}\"", .{hint.label});
+                try self.ghost_insert.appendSlice(self.allocator, "\"\"");
                 self.ghost_back = 1;
             } else {
-                try self.ghost_text.writer().print("<{s}>", .{hint.label});
+                try self.ghost_text.print(self.allocator, "<{s}>", .{hint.label});
             }
             return;
         }
         if (self.suggestion()) |rest| {
-            try self.ghost_text.appendSlice(rest);
-            try self.ghost_insert.appendSlice(rest);
+            try self.ghost_text.appendSlice(self.allocator, rest);
+            try self.ghost_insert.appendSlice(self.allocator, rest);
         }
     }
 
@@ -250,9 +255,9 @@ pub const Editor = struct {
         }
         const chosen = first orelse return false;
         const rest = chosen.text[result.typed.len..];
-        try self.ghost_text.appendSlice(rest);
-        try self.ghost_insert.appendSlice(rest);
-        try self.ghost_insert.appendSlice(chosen.suffix);
+        try self.ghost_text.appendSlice(self.allocator, rest);
+        try self.ghost_insert.appendSlice(self.allocator, rest);
+        try self.ghost_insert.appendSlice(self.allocator, chosen.suffix);
         return true;
     }
 
@@ -272,7 +277,7 @@ pub const Editor = struct {
 
     fn acceptSuggestion(self: *Editor) !void {
         if (self.ghost_insert.items.len == 0) return;
-        try self.buffer.appendSlice(self.ghost_insert.items);
+        try self.buffer.appendSlice(self.allocator, self.ghost_insert.items);
         self.cursor = self.buffer.items.len - self.ghost_back;
     }
 
@@ -281,7 +286,7 @@ pub const Editor = struct {
         if (pending.len == 0) return;
         var end = wordRight(pending, 0);
         if (end == 0 or self.ghost_back > 0) end = pending.len;
-        try self.buffer.appendSlice(pending[0..end]);
+        try self.buffer.appendSlice(self.allocator, pending[0..end]);
         self.cursor = self.buffer.items.len - if (end == pending.len) self.ghost_back else 0;
     }
 
@@ -315,7 +320,7 @@ pub const Editor = struct {
 
     fn loadLine(self: *Editor, text: []const u8) !void {
         self.buffer.clearRetainingCapacity();
-        try self.buffer.appendSlice(text);
+        try self.buffer.appendSlice(self.allocator, text);
         self.cursor = self.buffer.items.len;
     }
 
@@ -340,7 +345,7 @@ pub const Editor = struct {
     }
 
     fn insert(self: *Editor, bytes: []const u8) !void {
-        try self.buffer.insertSlice(self.cursor, bytes);
+        try self.buffer.insertSlice(self.allocator, self.cursor, bytes);
         self.cursor += bytes.len;
     }
 
@@ -353,7 +358,7 @@ pub const Editor = struct {
     }
 
     fn deleteRange(self: *Editor, start: usize, end: usize) !void {
-        try self.buffer.replaceRange(start, end - start, &.{});
+        try self.buffer.replaceRange(self.allocator, start, end - start, &.{});
         self.cursor = start;
     }
 
@@ -446,8 +451,9 @@ pub const Editor = struct {
     fn draw(self: *Editor, ghost: bool) !void {
         const cols = terminalColumns();
         const hint: []const u8 = if (ghost) self.ghost_text.items else "";
-        var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
-        const w = bw.writer();
+        var buf: [4096]u8 = undefined;
+        var fw = sys.stdout().writerStreaming(sys.io, &buf);
+        const w = &fw.interface;
 
         if (self.cursor_row > 0) try w.print("\x1b[{d}A", .{self.cursor_row});
         try w.writeAll("\r\x1b[J");
@@ -475,12 +481,15 @@ pub const Editor = struct {
         try w.writeAll("\r");
         if (target.col > 0) try w.print("\x1b[{d}C", .{target.col});
         self.cursor_row = target.row;
-        try bw.flush();
+        try w.flush();
     }
 };
 
 fn readByte() !u8 {
-    return std.io.getStdIn().reader().readByte();
+    var byte: [1]u8 = undefined;
+    const n = try sys.read(sys.STDIN_FILENO, &byte);
+    if (n == 0) return error.EndOfStream;
+    return byte[0];
 }
 
 fn inputPending() !bool {

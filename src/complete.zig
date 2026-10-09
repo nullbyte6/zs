@@ -1,4 +1,5 @@
 const std = @import("std");
+const sys = @import("sys.zig");
 const commands = @import("commands.zig");
 const functions = @import("functions.zig");
 const spec = @import("spec.zig");
@@ -70,7 +71,7 @@ pub fn complete(arena: std.mem.Allocator, line: []const u8, cursor: usize) !?Res
     if (std.mem.indexOfAny(u8, context.word, "'\"$`") != null) return null;
     const plain = try unescape(arena, context.word);
 
-    var lists = Lists{ .starts = .init(arena), .contains = .init(arena) };
+    var lists = Lists{ .starts = .empty, .contains = .empty };
     const command_like = context.expect_command and std.mem.indexOfScalar(u8, plain, '/') == null and !std.mem.startsWith(u8, plain, "~");
     if (command_like) {
         if (plain.len == 0) return null;
@@ -81,9 +82,9 @@ pub fn complete(arena: std.mem.Allocator, line: []const u8, cursor: usize) !?Res
 
     const starts = uniqueCandidates(lists.starts.items);
     const contains = uniqueCandidates(lists.contains.items);
-    var all = std.ArrayList(Candidate).init(arena);
-    try all.appendSlice(starts);
-    try all.appendSlice(contains);
+    var all: std.ArrayList(Candidate) = .empty;
+    try all.appendSlice(arena, starts);
+    try all.appendSlice(arena, contains);
     return .{
         .start = context.start,
         .typed = try escape(arena, plain, true),
@@ -235,7 +236,7 @@ fn offer(arena: std.mem.Allocator, lists: *Lists, typed: []const u8, name: []con
         &lists.contains
     else
         return;
-    try bucket.append(.{ .text = try escape(arena, name, false), .suffix = suffix });
+    try bucket.append(arena, .{ .text = try escape(arena, name, false), .suffix = suffix });
 }
 
 fn collectFiles(arena: std.mem.Allocator, plain: []const u8, list: *std.ArrayList(Candidate)) !void {
@@ -248,21 +249,21 @@ fn collectFiles(arena: std.mem.Allocator, plain: []const u8, list: *std.ArrayLis
         const home = vars.get("HOME") orelse return;
         open_path = try std.fmt.allocPrint(arena, "{s}{s}", .{ home, dir_part[1..] });
     }
-    var dir = std.fs.cwd().openDir(open_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = sys.cwd().openDir(sys.io, open_path, .{ .iterate = true }) catch return;
+    defer dir.close(sys.io);
 
     const escaped_dir = try escape(arena, dir_part, true);
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(sys.io) catch null) |entry| {
         if (!std.mem.startsWith(u8, entry.name, base)) continue;
         if (entry.name[0] == '.' and (base.len == 0 or base[0] != '.')) continue;
         var is_dir = entry.kind == .directory;
         if (entry.kind == .sym_link) {
-            if (dir.statFile(entry.name)) |stat| is_dir = stat.kind == .directory else |_| {}
+            if (dir.statFile(sys.io, entry.name, .{})) |stat| is_dir = stat.kind == .directory else |_| {}
         }
         const name = try escape(arena, entry.name, false);
         const trailing: []const u8 = if (is_dir) "/" else "";
-        try list.append(.{
+        try list.append(arena, .{
             .text = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ escaped_dir, name, trailing }),
             .suffix = if (is_dir) "" else " ",
         });
@@ -270,22 +271,22 @@ fn collectFiles(arena: std.mem.Allocator, plain: []const u8, list: *std.ArrayLis
 }
 
 fn unescape(arena: std.mem.Allocator, word: []const u8) ![]const u8 {
-    var out = std.ArrayList(u8).init(arena);
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < word.len) : (i += 1) {
         if (word[i] == '\\' and i + 1 < word.len) i += 1;
-        try out.append(word[i]);
+        try out.append(arena, word[i]);
     }
     return out.items;
 }
 
 fn escape(arena: std.mem.Allocator, text: []const u8, keep_tilde: bool) ![]const u8 {
-    var out = std.ArrayList(u8).init(arena);
+    var out: std.ArrayList(u8) = .empty;
     for (text, 0..) |c, index| {
         const special = std.mem.indexOfScalar(u8, " \t\n'\"\\$`&|;<>()*?[]{}#!^", c) != null;
         const tilde = c == '~' and index == 0 and !keep_tilde;
-        if (special or tilde) try out.append('\\');
-        try out.append(c);
+        if (special or tilde) try out.append(arena, '\\');
+        try out.append(arena, c);
     }
     return out.items;
 }

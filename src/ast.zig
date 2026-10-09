@@ -121,7 +121,7 @@ const Parser = struct {
     }
 
     fn parseList(self: *Parser, terminators: []const []const u8) Error!List {
-        var items = std.ArrayList(Item).init(self.arena);
+        var items: std.ArrayList(Item) = .empty;
         var join: Join = .always;
         var need_command = false;
         while (true) {
@@ -144,7 +144,7 @@ const Parser = struct {
                 break;
             }
             const node = try self.finishCommand(try self.parseCommand());
-            try items.append(.{ .node = node, .join = join });
+            try items.append(self.arena, .{ .node = node, .join = join });
             join = .always;
             need_command = false;
             self.skipBlanks();
@@ -183,15 +183,15 @@ const Parser = struct {
         if (current != .simple) current = try self.attachRedirects(current);
         self.skipBlanks();
         if (!self.atPipe()) return current;
-        var stages = std.ArrayList(Node).init(self.arena);
-        try stages.append(current);
+        var stages: std.ArrayList(Node) = .empty;
+        try stages.append(self.arena, current);
         while (self.atPipe()) {
             self.pos += 1;
             while (self.pos < self.text.len and std.mem.indexOfScalar(u8, " \t\n", self.text[self.pos]) != null) self.pos += 1;
             if (self.eof()) return error.Incomplete;
             var stage = try self.parseCommand();
             if (stage != .simple) stage = try self.attachRedirects(stage);
-            try stages.append(stage);
+            try stages.append(self.arena, stage);
             self.skipBlanks();
         }
         return .{ .pipeline = stages.items };
@@ -242,7 +242,7 @@ const Parser = struct {
 
     fn parseIf(self: *Parser) Error!Node {
         self.pos += 2;
-        var branches = std.ArrayList(Branch).init(self.arena);
+        var branches: std.ArrayList(Branch) = .empty;
         var else_body: ?List = null;
         while (true) {
             const cond = try self.parseList(&.{"then"});
@@ -250,7 +250,7 @@ const Parser = struct {
             self.pos += 4;
             const body = try self.parseList(&.{ "elif", "else", "fi" });
             if (body.len == 0) return error.Syntax;
-            try branches.append(.{ .cond = cond, .body = body });
+            try branches.append(self.arena, .{ .cond = cond, .body = body });
             const word = self.peekWord();
             if (std.mem.eql(u8, word, "elif")) {
                 self.pos += 4;
@@ -364,7 +364,7 @@ const Parser = struct {
         if (self.eof()) return error.Incomplete;
         if (!std.mem.eql(u8, self.peekWord(), "in")) return error.Syntax;
         self.pos += 2;
-        var arms = std.ArrayList(CaseArm).init(self.arena);
+        var arms: std.ArrayList(CaseArm) = .empty;
         while (true) {
             self.skipSeparators();
             if (self.eof()) return error.Incomplete;
@@ -374,7 +374,7 @@ const Parser = struct {
             }
             const patterns = try self.scanPatterns();
             const body = try self.parseList(&.{ ";;", "esac" });
-            try arms.append(.{ .patterns = patterns, .body = body });
+            try arms.append(self.arena, .{ .patterns = patterns, .body = body });
             if (std.mem.startsWith(u8, self.text[self.pos..], ";;")) self.pos += 2;
         }
         return .{ .case_clause = .{ .subject = subject, .arms = arms.items } };
@@ -383,7 +383,7 @@ const Parser = struct {
     fn scanPatterns(self: *Parser) Error![]const []const u8 {
         const text = self.text;
         if (text[self.pos] == '(') self.pos += 1;
-        var patterns = std.ArrayList([]const u8).init(self.arena);
+        var patterns: std.ArrayList([]const u8) = .empty;
         var segment = self.pos;
         var i = self.pos;
         while (true) {
@@ -392,7 +392,7 @@ const Parser = struct {
                 ')', '|' => {
                     const pattern = std.mem.trim(u8, text[segment..i], " \t");
                     if (pattern.len == 0) return error.Syntax;
-                    try patterns.append(pattern);
+                    try patterns.append(self.arena, pattern);
                     i += 1;
                     segment = i;
                     if (text[i - 1] == ')') break;

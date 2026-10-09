@@ -19,22 +19,23 @@ const Saved = struct {
 };
 
 const Frame = struct {
-    params: std.ArrayListUnmanaged([]u8) = .{},
-    saved: std.ArrayListUnmanaged(Saved) = .{},
+    params: std.ArrayList([]u8) = .empty,
+    saved: std.ArrayList(Saved) = .empty,
 };
 
-var frames: std.ArrayListUnmanaged(Frame) = .{};
-var top_params: std.ArrayListUnmanaged([]u8) = .{};
+var frames: std.ArrayList(Frame) = .empty;
+var top_params: std.ArrayList([]u8) = .empty;
 
-pub fn init(gpa: std.mem.Allocator) !void {
+pub fn init(
+    gpa: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+) !void {
     allocator = gpa;
     shell_pid = std.os.linux.getpid();
-    for (std.os.environ) |entry_z| {
-        const entry = std.mem.span(entry_z);
-        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
-        if (eq == 0) continue;
-        try set(entry[0..eq], entry[eq + 1 ..]);
-        try markExported(entry[0..eq]);
+
+    for (environ_map.keys(), environ_map.values()) |name, value| {
+        try set(name, value);
+        try markExported(name);
     }
 }
 
@@ -86,25 +87,25 @@ pub fn unset(name: []const u8) void {
 }
 
 pub fn exportedNames(arena: std.mem.Allocator) ![][]const u8 {
-    var names = std.ArrayList([]const u8).init(arena);
+    var names: std.ArrayList([]const u8) = .empty;
     var it = exported.keyIterator();
     while (it.next()) |key| {
-        if (values.contains(key.*)) try names.append(key.*);
+        if (values.contains(key.*)) try names.append(arena, key.*);
     }
     std.mem.sort([]const u8, names.items, {}, lessThan);
     return names.items;
 }
 
 pub fn environ(arena: std.mem.Allocator, overlay: []const Assignment) ![:null]?[*:0]const u8 {
-    var entries = std.ArrayList(?[*:0]const u8).init(arena);
+    var entries: std.ArrayList(?[*:0]const u8) = .empty;
     var it = exported.keyIterator();
     while (it.next()) |key| {
         if (isOverlaid(overlay, key.*)) continue;
         const value = values.get(key.*) orelse continue;
-        try entries.append((try std.fmt.allocPrintZ(arena, "{s}={s}", .{ key.*, value })).ptr);
+        try entries.append(arena, (try std.fmt.allocPrintSentinel(arena, "{s}={s}", .{ key.*, value }, 0)).ptr);
     }
     for (overlay) |assignment| {
-        try entries.append((try std.fmt.allocPrintZ(arena, "{s}={s}", .{ assignment.name, assignment.value })).ptr);
+        try entries.append(arena, (try std.fmt.allocPrintSentinel(arena, "{s}={s}", .{ assignment.name, assignment.value }, 0)).ptr);
     }
     const result = try arena.allocSentinel(?[*:0]const u8, entries.items.len, null);
     @memcpy(result, entries.items);
@@ -154,7 +155,7 @@ fn freeFrame(frame: *Frame) void {
     frame.saved.deinit(allocator);
 }
 
-fn currentParams() *std.ArrayListUnmanaged([]u8) {
+fn currentParams() *std.ArrayList([]u8) {
     if (frames.items.len == 0) return &top_params;
     return &frames.items[frames.items.len - 1].params;
 }
@@ -164,7 +165,7 @@ pub fn params() []const []u8 {
 }
 
 pub fn setParams(args: []const []const u8) !void {
-    var fresh = std.ArrayListUnmanaged([]u8){};
+    var fresh: std.ArrayList([]u8) = .empty;
     errdefer {
         for (fresh.items) |param| allocator.free(param);
         fresh.deinit(allocator);
@@ -185,9 +186,9 @@ pub fn shift(count: usize) bool {
 }
 
 pub fn variableNames(arena: std.mem.Allocator) ![][]const u8 {
-    var list = std.ArrayList([]const u8).init(arena);
+    var list: std.ArrayList([]const u8) = .empty;
     var it = values.keyIterator();
-    while (it.next()) |key| try list.append(key.*);
+    while (it.next()) |key| try list.append(arena, key.*);
     std.mem.sort([]const u8, list.items, {}, lessThan);
     return list.items;
 }

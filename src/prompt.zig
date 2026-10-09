@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const vars = @import("vars.zig");
+const sys = @import("sys.zig");
 
 pub const default_format = "\\e[1;32m\\u@\\h\\e[0m \\e[1;34m\\W\\e[0m\\e[1;33m>>\\e[0m ";
 
@@ -66,7 +67,7 @@ pub fn reset() void {
 }
 
 pub fn unknownEscapes(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var found = std.ArrayList(u8).init(arena);
+    var found: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i + 1 < text.len) : (i += 1) {
         if (text[i] != '\\') continue;
@@ -74,51 +75,51 @@ pub fn unknownEscapes(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
         if (std.mem.startsWith(u8, text[i..], "033")) {
             i += 2;
         } else if (std.mem.indexOfScalar(u8, known_escapes, text[i]) == null) {
-            if (std.mem.indexOfScalar(u8, found.items, text[i]) == null) try found.append(text[i]);
+            if (std.mem.indexOfScalar(u8, found.items, text[i]) == null) try found.append(arena, text[i]);
         }
     }
     return found.items;
 }
 
 pub fn render(arena: std.mem.Allocator, text: []const u8, color: bool, last_status: u8) ![]const u8 {
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch "";
-    var out = std.ArrayList(u8).init(arena);
+    var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd = sys.getCwd(&cwd_buf) catch "";
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         if (text[i] != '\\' or i + 1 >= text.len) {
-            try out.append(text[i]);
+            try out.append(arena, text[i]);
             continue;
         }
         i += 1;
         switch (text[i]) {
-            'u' => try out.appendSlice(vars.get("USER") orelse "user"),
+            'u' => try out.appendSlice(arena, vars.get("USER") orelse "user"),
             'h', 'H' => {
                 var host_buf: [posix.HOST_NAME_MAX]u8 = undefined;
                 const full = posix.gethostname(&host_buf) catch "localhost";
-                try out.appendSlice(if (text[i] == 'H') full else full[0 .. std.mem.indexOfScalar(u8, full, '.') orelse full.len]);
+                try out.appendSlice(arena, if (text[i] == 'H') full else full[0 .. std.mem.indexOfScalar(u8, full, '.') orelse full.len]);
             },
-            'w' => try out.appendSlice(try homeRelative(arena, cwd)),
-            'W' => try out.appendSlice(directoryName(cwd)),
-            't', 'A', 'd' => if (localNow()) |tm| try appendTime(&out, tm, text[i]),
-            'g' => if (gitBranch(arena, cwd)) |branch| try out.appendSlice(branch),
-            '?' => try out.writer().print("{d}", .{last_status}),
-            '$' => try out.append(if (std.os.linux.geteuid() == 0) '#' else '$'),
-            'n' => try out.append('\n'),
-            'e' => try out.append(0x1b),
+            'w' => try out.appendSlice(arena, try homeRelative(arena, cwd)),
+            'W' => try out.appendSlice(arena, directoryName(cwd)),
+            't', 'A', 'd' => if (localNow()) |tm| try appendTime(arena, &out, tm, text[i]),
+            'g' => if (gitBranch(arena, cwd)) |branch| try out.appendSlice(arena, branch),
+            '?' => try out.print(arena, "{d}", .{last_status}),
+            '$' => try out.append(arena, if (std.os.linux.geteuid() == 0) '#' else '$'),
+            'n' => try out.append(arena, '\n'),
+            'e' => try out.append(arena, 0x1b),
             '0' => {
                 if (std.mem.startsWith(u8, text[i..], "033")) {
-                    try out.append(0x1b);
+                    try out.append(arena, 0x1b);
                     i += 2;
                 } else {
-                    try out.appendSlice("\\0");
+                    try out.appendSlice(arena, "\\0");
                 }
             },
-            '\\' => try out.append('\\'),
+            '\\' => try out.append(arena, '\\'),
             '[', ']' => {},
             else => {
-                try out.append('\\');
-                try out.append(text[i]);
+                try out.append(arena, '\\');
+                try out.append(arena, text[i]);
             },
         }
     }
@@ -126,12 +127,11 @@ pub fn render(arena: std.mem.Allocator, text: []const u8, color: bool, last_stat
     return out.items;
 }
 
-fn appendTime(out: *std.ArrayList(u8), tm: Tm, kind: u8) !void {
-    const writer = out.writer();
+fn appendTime(arena: std.mem.Allocator, out: *std.ArrayList(u8), tm: Tm, kind: u8) !void {
     switch (kind) {
-        't' => try writer.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ unsigned(tm.tm_hour), unsigned(tm.tm_min), unsigned(tm.tm_sec) }),
-        'A' => try writer.print("{d:0>2}:{d:0>2}", .{ unsigned(tm.tm_hour), unsigned(tm.tm_min) }),
-        else => try writer.print("{s} {s} {d:0>2}", .{
+        't' => try out.print(arena, "{d:0>2}:{d:0>2}:{d:0>2}", .{ unsigned(tm.tm_hour), unsigned(tm.tm_min), unsigned(tm.tm_sec) }),
+        'A' => try out.print(arena, "{d:0>2}:{d:0>2}", .{ unsigned(tm.tm_hour), unsigned(tm.tm_min) }),
+        else => try out.print(arena, "{s} {s} {d:0>2}", .{
             weekdays[@intCast(@mod(tm.tm_wday, 7))],
             months[@intCast(@mod(tm.tm_mon, 12))],
             unsigned(tm.tm_mday),
@@ -144,7 +144,7 @@ fn unsigned(value: c_int) u32 {
 }
 
 fn localNow() ?Tm {
-    const seconds: c_long = @intCast(std.time.timestamp());
+    const seconds: c_long = @intCast(sys.timestamp());
     var tm: Tm = undefined;
     if (localtime_r(&seconds, &tm) == null) return null;
     return tm;
@@ -179,9 +179,9 @@ fn gitBranch(arena: std.mem.Allocator, cwd: []const u8) ?[]const u8 {
 
 fn headOf(arena: std.mem.Allocator, dir: []const u8) ?[]const u8 {
     const direct = std.fmt.allocPrint(arena, "{s}/.git/HEAD", .{dir}) catch return null;
-    if (std.fs.cwd().readFileAlloc(arena, direct, 4096)) |content| return branchFrom(content) else |_| {}
+    if (sys.cwd().readFileAlloc(sys.io, direct, arena, .limited(4096))) |content| return branchFrom(content) else |_| {}
     const pointer = std.fmt.allocPrint(arena, "{s}/.git", .{dir}) catch return null;
-    const link = std.fs.cwd().readFileAlloc(arena, pointer, 4096) catch return null;
+    const link = sys.cwd().readFileAlloc(sys.io, pointer, arena, .limited(4096)) catch return null;
     const trimmed = std.mem.trim(u8, link, " \r\n");
     if (!std.mem.startsWith(u8, trimmed, "gitdir: ")) return null;
     const target = trimmed["gitdir: ".len..];
@@ -189,7 +189,7 @@ fn headOf(arena: std.mem.Allocator, dir: []const u8) ?[]const u8 {
         std.fmt.allocPrint(arena, "{s}/HEAD", .{target}) catch return null
     else
         std.fmt.allocPrint(arena, "{s}/{s}/HEAD", .{ dir, target }) catch return null;
-    const content = std.fs.cwd().readFileAlloc(arena, head, 4096) catch return null;
+    const content = sys.cwd().readFileAlloc(sys.io, head, arena, .limited(4096)) catch return null;
     return branchFrom(content);
 }
 
